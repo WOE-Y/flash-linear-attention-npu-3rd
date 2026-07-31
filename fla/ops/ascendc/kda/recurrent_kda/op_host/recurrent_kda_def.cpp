@@ -29,7 +29,7 @@ public:
         this->Input("value").ParamType(REQUIRED).DataType(qkvTypes).Format(formats).UnknownShapeFormat(formats);
         this->Input("gate").ParamType(REQUIRED).DataType(f32Types).Format(formats).UnknownShapeFormat(formats);
         this->Input("beta").ParamType(REQUIRED).DataType(f32Types).Format(formats).UnknownShapeFormat(formats);
-        this->Input("state")
+        this->Input("initial_state")
             .ParamType(REQUIRED)
             .DataType(stateTypes)
             .Format(formats)
@@ -52,8 +52,14 @@ public:
             .DataType(i64Types)
             .Format(formats)
             .UnknownShapeFormat(formats);
-        this->Output("out").ParamType(REQUIRED).DataType(qkvTypes).Format(formats).UnknownShapeFormat(formats);
-        this->Output("state")
+        this->Output("attn_out").ParamType(REQUIRED).DataType(qkvTypes).Format(formats).UnknownShapeFormat(formats);
+        this->Output("initial_state")
+            .ParamType(REQUIRED)
+            .DataType(stateTypes)
+            .Format(formats)
+            .UnknownShapeFormat(formats)
+            .IgnoreContiguous();
+        this->Output("final_state")
             .ParamType(REQUIRED)
             .DataType(stateTypes)
             .Format(formats)
@@ -62,13 +68,15 @@ public:
 
         this->Attr("layout").AttrType(OPTIONAL).String("BSND");
         this->Attr("scale").AttrType(OPTIONAL).Float(1.0);
+        this->Attr("output_final_state").AttrType(OPTIONAL).Bool(false);
+        this->Attr("inplace_final_state").AttrType(OPTIONAL).Bool(true);
         this->Attr("use_qk_l2norm_in_kernel").AttrType(OPTIONAL).Bool(false);
         this->Attr("use_gate_in_kernel").AttrType(OPTIONAL).Bool(false);
         this->Attr("use_beta_sigmoid_in_kernel").AttrType(OPTIONAL).Bool(false);
         this->Attr("allow_neg_eigval").AttrType(OPTIONAL).Bool(false);
         this->Attr("safe_gate").AttrType(OPTIONAL).Bool(false);
         this->Attr("lower_bound").AttrType(OPTIONAL).Float(-5.0);
-        this->Attr("state_v_first").AttrType(OPTIONAL).Bool(true);
+        this->Attr("state_v_first").AttrType(OPTIONAL).Bool(false);
 
         OpAICoreConfig aicConfig;
         aicConfig.DynamicCompileStaticFlag(true)

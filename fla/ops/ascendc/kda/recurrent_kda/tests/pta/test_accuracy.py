@@ -104,6 +104,7 @@ def main():
                 "use_beta_sigmoid_in_kernel": True,
                 "allow_neg_eigval": False,
                 "safe_gate": False,
+                "state_v_first": True,
             },
         ),
         run_case(
@@ -116,16 +117,19 @@ def main():
                 "allow_neg_eigval": True,
                 "safe_gate": True,
                 "lower_bound": -4.0,
+                "state_v_first": True,
             },
         ),
         run_case(
             "TND precomputed log gate",
-            {"layout": "TND", "batch": 2, "seq_len": 2, "seed": 3, "with_initial_state": False},
+            {"layout": "TND", "batch": 2, "seq_len": 2, "vdim": 256, "seed": 3, "with_initial_state": False},
             {
                 "use_qk_l2norm_in_kernel": False,
                 "use_gate_in_kernel": False,
                 "use_beta_sigmoid_in_kernel": False,
                 "safe_gate": False,
+                "inplace_final_state": False,
+                "state_v_first": False,
             },
         ),
     ]

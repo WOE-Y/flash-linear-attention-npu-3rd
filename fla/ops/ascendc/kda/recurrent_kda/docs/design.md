@@ -3,7 +3,7 @@
 ## 1. 背景
 
 KDA recurrent 用于小步长 decode/MTP 场景，按 token 顺序更新 KDA 状态并生成输出。上游常用 API 支持
-raw gate、`A_log/dt_bias/lower_bound/safe_gate`、`beta sigmoid` 和 `state_v_first=True` 状态布局。该实现的目标
+raw gate、`A_log/dt_bias/lower_bound/safe_gate`、`beta sigmoid`、两种 state 布局和可选原地 final state。该实现的目标
 是在一个 KDA 独立算子中完成这些语义，避免把 gate 预处理拆成 `KdaGateCumsum + recurrent` 两段公共实现，也不复用
 GDN recurrent 的函数接口。
 
@@ -18,7 +18,6 @@ GDN recurrent 的函数接口。
 
 ### 2.2 非目标
 
-- 不支持 `state_v_first=False`。
 - 不支持把 `KdaGateCumsum` 的输出流水作为公开前置步骤。
 - 不在本 PR 扩展长序列 chunk recurrent；每条 recurrent 序列长度当前限制为 `<=8`。
 
@@ -37,7 +36,7 @@ GDN recurrent 的函数接口。
 | Gate/Beta dtype | FP32/BF16/FP16，aclnn 预处理为 FP32 |
 | State dtype | FP32/BF16 |
 | Gate 模式 | 预计算 step log gate；kernel 内 raw gate |
-| State layout | `state_v_first=True`，`[state_capacity,H_v,V,K]` |
+| State layout | V-first：`[state_capacity,H_v,V,K]`；K-first：`[state_capacity,H_v,K,V]` |
 
 ## 4. 数学与接口语义
 
@@ -71,9 +70,7 @@ o_t = S @ q_t
 
 ## 5. 整体架构
 
-- `op_host/op_api/aclnn_recurrent_kda.cpp`：校验 dtype、layout、shape、可选输入组合；不读取 device metadata 的值；
-  对 q/k/v、gate/beta、state 和可选 tensor 做连续化与必要 cast；非连续 state 通过临时连续 tensor 和
-  `ViewCopy` 回写原 view；创建 L0 executor。
+- `op_host/op_api/aclnn_recurrent_kda.cpp`：校验 dtype、layout、shape、host `aclIntArray` 累积边界和可选输入组合；对 tensor 做连续化与必要 cast；按 `inplace_final_state` 选择 initial/final state 写回目标；创建 L0 executor。
 - `op_host/recurrent_kda_tiling.cpp`：读取输入 shape、属性和可选输入存在性，填充 `RecurrentKdaTilingData`，计算 block dim 与 UB 切分。
 - `op_kernel/recurrent_kda.cpp`：单个 AIV kernel 完成 q/k normalize、raw gate 转换、state decay、delta 更新、输出和最终状态写回。
 - `torch_custom/fla_npu/fla_npu/ops/ascendc/_aclnn_ctypes.py`：提供解耦 Python ctypes 入口，不注册 `torch.ops.npu`。
@@ -83,7 +80,7 @@ o_t = S @ q_t
 
 ### 6.1 任务划分
 
-Tiling 按逻辑序列和 value head 拆分任务。`cu_seqlens` 必传，`seq_num=len(cu_seqlens)-1`，使用与
+Tiling 按逻辑序列和 value head 拆分任务。`cu_seqlens` 在 L0 已转换为 INT64 tensor；公开 aclnn 中为可选 `aclIntArray`，为空时自动生成定长边界，`seq_num=len(cu_seqlens)-1`，使用与
 fla-org 一致的累计边界语义；第 `i` 条序列范围为 `[cu_seqlens[i], cu_seqlens[i+1])`。当前单任务面向
 recurrent 小步长，每个相邻 offset 的差值限制为 `<=8`。末项表示有效 token 数，可小于图捕获的
 token capacity。
@@ -109,7 +106,7 @@ token capacity。
 ### 6.3 模板化方案与 tiling key
 
 当前 kernel 通过 `REGISTER_TILING_DEFAULT(RecurrentKdaTilingData)` 使用默认 tiling data，不引入额外 tiling key。
-dtype 固定为 BF16 QKV，state dtype 由编译宏 `DTYPE_STATE` 实例化；layout、gate/beta 分支和可选输入存在性由
+dtype 固定为 BF16 QKV，state dtype 由编译宏 `DTYPE_INITIAL_STATE` 实例化；layout、gate/beta 分支和可选输入存在性由
 tiling data 驱动，避免把 runtime shape 组合扩张到 tiling key。
 
 ## 7. Kernel 设计
@@ -117,10 +114,10 @@ tiling data 驱动，避免把 runtime shape 组合扩张到 tiling key。
 ### 7.1 计算流程
 
 1. 解析当前任务对应的逻辑序列、value head、query/key head 和状态槽。
-2. 加载初始状态到 UB 工作区；`initial_state=None` 的场景由 Python/legacy wrapper 预先创建全零状态。
+2. 按 `state_v_first` 加载 V-first 或 K-first 初始状态到统一的 UB `[V,K]` 工作区；非原地且 `initial_state=None` 时 Python wrapper 创建 FP32 全零状态。
 3. 对每个 token 加载 `q/k/v/g/beta`，按属性执行 q/k normalize、raw gate 转换和 beta sigmoid。
 4. 对状态做 gate decay，计算 `S @ k`、delta 和 outer 更新。
-5. 计算 `S @ q` 写回 `out`，并把状态原位写回命中的 state pool 槽。
+5. 计算 `S @ q` 写回 `attn_out`，并按 `inplace_final_state` 把状态写回 initial state 或独立 final state。
 
 ### 7.2 内存规划
 
@@ -139,8 +136,7 @@ tiling data 驱动，避免把 runtime shape 组合扩张到 tiling key。
 
 ### 7.4 边界处理
 
-- `cu_seqlens` 首项必须为 0，offset 必须单调不减，末项为有效 token 数且不得超过输入 token
-  capacity。host 只检查 rank/dtype，device kernel 校验值。
+- `cu_seqlens` 首项必须为 0，offset 必须单调不减，末项等于输入总 token 数；host aclnn 逐项校验，单段长度不超过 8。
 - 相邻 offset 相等时表示空序列；该序列不产生 token 输出，也不读取 `ssm_state_indices/num_accepted_tokens` 或 state。
 - 末项小于 capacity 时，仅 `[0,cu_seqlens[-1])` 的有效输出和 state side effect 有定义；padding tail 输出不作保证。
 - 一维 `ssm_state_indices` 按 packed token 偏移读取；二维索引按 `[seq_idx,step]` 读取，第二维必须覆盖对应序列长度。
@@ -157,7 +153,7 @@ tiling data 驱动，避免把 runtime shape 组合扩张到 tiling key。
 ## 9. 精度设计
 
 Q/K/V 公开输入为 BF16，gate/beta 在 aclnn 预处理后以 FP32 进入 kernel。state 可为 FP32 或 BF16；推荐 FP32 状态以降低
-小步长多 token 更新中的累计误差。CPU reference 位于 `tests/reference/recurrent_kda_reference.py`，JSON 阈值对 BF16
+小步长多 token 更新中的累计误差。CPU reference 位于 `tests/pta/golden.py`，JSON 阈值对 BF16
 输出使用 `rtol=0.02, atol=0.01`。
 
 ## 10. 性能设计
@@ -180,7 +176,7 @@ Q/K/V 公开输入为 BF16，gate/beta 在 aclnn 预处理后以 FP32 进入 ker
   覆盖 `cu_seqlens` 长度和值泛化；每段 recurrent 长度仍遵循当前 `<=8` 限制。
 - Kimi 完整长上下文 stress target：`T_total=12288,H=H_v=96,K=V=128,safe_gate=True` 记录在 JSON，
   因当前单 kernel 计算量较大，不纳入默认通过矩阵。
-- 负向参数组合：长序列、`safe_gate` 与 raw gate 组合、`state_v_first=false`。
+- 负向参数组合：长序列、非法 layout/shape、`safe_gate` 与 raw gate 的非法组合。
 
 设备侧主入口为 `tests/operators/recurrent_kda/accuracy/test_recurrent_kda.py`，底层 PTA 入口为
 `fla/ops/ascendc/kda/recurrent_kda/tests/pta/test_accuracy.py`。
@@ -198,6 +194,5 @@ A2/A5 精度验证过程中修复以下问题：
 - 当前仅支持 BF16 QKV。
 - 当前 `K/V` 仅支持 `K=128,V=128` 或 `K=128,V=256`。
 - 当前每段 recurrent 序列长度限制为 `<=8`。
-- 当前仅支持 `state_v_first=True`。
 - 显式 slot 模式要求所有活跃序列的写槽互不冲突，且 slot 值位于 state pool 容量范围内。
 - 后续若扩展长序列或更多 dtype，需要同步更新 op_host 校验、tiling、kernel、JSON case 和 API 文档。

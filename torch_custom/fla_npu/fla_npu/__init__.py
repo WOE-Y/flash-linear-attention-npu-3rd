@@ -117,9 +117,13 @@ def load_ascendc_opapi_libraries() -> list[ctypes.CDLL]:
 
     vendor_dir = _prepare_embedded_opp()
     op_api_dir = vendor_dir / "op_api" / "lib"
+    tiling_library = vendor_dir / "op_impl" / "ai_core" / "tbe" / "op_tiling" / "liboptiling.so"
     custom_opapi = op_api_dir / "libcust_opapi.so"
     opapi_alias = op_api_dir / "libopapi.so"
 
+    libraries = []
+    if tiling_library.exists():
+        libraries.append(_load_shared_library_required(tiling_library))
     try:
         custom_library = _load_shared_library_required(custom_opapi)
     except OSError as exc:
@@ -127,7 +131,7 @@ def load_ascendc_opapi_libraries() -> list[ctypes.CDLL]:
             f"Unable to load embedded FLA NPU custom op_api library: {custom_opapi}. "
             f"Dynamic loader error: {exc}"
         ) from exc
-    libraries = [custom_library]
+    libraries.append(custom_library)
     if opapi_alias.exists():
         libraries.append(_load_shared_library_required(opapi_alias))
 

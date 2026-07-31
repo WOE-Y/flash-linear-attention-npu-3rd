@@ -74,7 +74,9 @@ struct RecurrentKdaTilingContext {
     uint32_t useBetaSigmoid = 0;
     uint32_t allowNegEigval = 0;
     uint32_t safeGate = 0;
-    uint32_t stateVFirst = 1;
+    uint32_t stateVFirst = 0;
+    uint32_t outputFinalState = 0;
+    uint32_t inplaceFinalState = 1;
     ge::DataType stateDtype = ge::DT_BF16;
     uint64_t aivNum = 0;
     uint64_t ubSize = 0;
@@ -318,17 +320,16 @@ private:
         if (!CheckDim(stateShape, RKDA_STATE_DIM_NUM, "initial_state")) {
             return ge::GRAPH_FAILED;
         }
-        OP_CHECK_IF(!ctx_.stateVFirst,
-                    OP_LOGE(ctx_.nodeName, "state_v_first=false is not supported by RecurrentKda."),
-                    return ge::GRAPH_FAILED);
         int64_t seqNum = SeqNum(cuSeqlensShape);
+        bool stateTailMatches = ctx_.stateVFirst ?
+            (stateShape.GetDim(RKDA_DIM_2) == vDim && stateShape.GetDim(RKDA_DIM_3) == kDim) :
+            (stateShape.GetDim(RKDA_DIM_2) == kDim && stateShape.GetDim(RKDA_DIM_3) == vDim);
         OP_CHECK_IF(stateShape.GetDim(RKDA_DIM_0) <= 0 ||
                         (!ctx_.hasSsmStateIndices && stateShape.GetDim(RKDA_DIM_0) != seqNum) ||
-                        stateShape.GetDim(RKDA_DIM_1) != hvNum ||
-                        stateShape.GetDim(RKDA_DIM_2) != vDim ||
-                        stateShape.GetDim(RKDA_DIM_3) != kDim,
+                        stateShape.GetDim(RKDA_DIM_1) != hvNum || !stateTailMatches,
                     OP_LOGE(ctx_.nodeName,
-                            "state must be [state_capacity, HV, V, K]; without ssm_state_indices, "
+                            "state must be [state_capacity, HV, V, K] when state_v_first=true or "
+                            "[state_capacity, HV, K, V] otherwise; without ssm_state_indices, "
                             "state_capacity must equal seq_num."),
                     return ge::GRAPH_FAILED);
 
@@ -376,6 +377,8 @@ private:
         tiling.allowNegEigval = ctx_.allowNegEigval;
         tiling.safeGate = ctx_.safeGate;
         tiling.stateVFirst = ctx_.stateVFirst;
+        tiling.outputFinalState = ctx_.outputFinalState;
+        tiling.inplaceFinalState = ctx_.inplaceFinalState;
     }
 
     ge::graphStatus CheckShapeValueRangeAndRule(const RecurrentKdaTilingData &tiling) const

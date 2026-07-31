@@ -77,6 +77,7 @@ public:
         useBetaSigmoid_ = (tilingData->useBetaSigmoid == 1);
         allowNegEigval_ = (tilingData->allowNegEigval == 1);
         safeGate_ = (tilingData->safeGate == 1);
+        stateVFirst_ = (tilingData->stateVFirst == 1);
         useAddFoldReduce_ = (RKDA_ENABLE_ADD_FOLD_REDUCE != 0);
         vStep_ = tilingData->vStep;
         stateOutBufferNum_ = (tilingData->stateOutBufferNum == MAX_OUT_BUFFER_NUM) ? MAX_OUT_BUFFER_NUM : BUFFER_NUM;
@@ -362,6 +363,8 @@ private:
             PipeBarrier<PIPE_V>();
             ReduceSumDispatch(deltaInUb, broadTmpInUb, 1);
             PipeBarrier<PIPE_V>();
+            Adds(deltaInUb, deltaInUb, 1e-6f, 1);
+            PipeBarrier<PIPE_V>();
             Sqrt(deltaInUb, deltaInUb, 1);
             PipeBarrier<PIPE_V>();
             SyncVToS();
@@ -468,13 +471,24 @@ private:
         vInQueue_.FreeTensor(vLocal);
     }
 
-    __aicore__ inline void PrefetchState(uint64_t stateOffest, uint32_t curSingleV)
+    __aicore__ inline void PrefetchState(uint64_t stateSlot, uint64_t head, uint64_t vOffset,
+                                          uint32_t curSingleV)
     {
         LocalTensor<stateType> stateLocal = stateInQueue_.AllocTensor<stateType>();
-        DataCopyExtParams stateInParams{static_cast<uint16_t>(curSingleV),
-                                        static_cast<uint16_t>(realK_ * sizeof(stateType)), 0, 0, 0};
-        DataCopyPadExtParams<stateType> padParams{true, 0, static_cast<uint8_t>(alignK_ - realK_), 0};
-        DataCopyPad(stateLocal, initStateGm_[stateOffest], stateInParams, padParams);
+        if (stateVFirst_) {
+            uint64_t stateOffset = ((stateSlot * NV_ + head) * realV_ + vOffset) * realK_;
+            DataCopyExtParams stateInParams{static_cast<uint16_t>(curSingleV),
+                                            static_cast<uint16_t>(realK_ * sizeof(stateType)), 0, 0, 0};
+            DataCopyPadExtParams<stateType> padParams{true, 0, static_cast<uint8_t>(alignK_ - realK_), 0};
+            DataCopyPad(stateLocal, initStateGm_[stateOffset], stateInParams, padParams);
+        } else {
+            for (uint32_t v = 0; v < curSingleV; ++v) {
+                for (uint32_t k = 0; k < realK_; ++k) {
+                    uint64_t stateOffset = ((stateSlot * NV_ + head) * realK_ + k) * realV_ + vOffset + v;
+                    stateLocal.SetValue(v * alignK_ + k, initStateGm_.GetValue(stateOffset));
+                }
+            }
+        }
         stateInQueue_.EnQue<stateType>(stateLocal);
     }
 
@@ -621,12 +635,24 @@ private:
         attnOutQueue_.FreeTensor(attnLocal);
     }
 
-    __aicore__ inline void CopyOutState(uint64_t stateOffset, uint32_t curSingleV)
+    __aicore__ inline void CopyOutState(uint64_t stateSlot, uint64_t head, uint64_t vOffset,
+                                         uint32_t curSingleV)
     {
         LocalTensor<stateType> stateOutLocal = stateOutQueue_.DeQue<stateType>();
-        DataCopyParams stateOutParams{static_cast<uint16_t>(curSingleV),
-                                      static_cast<uint16_t>(realK_ * sizeof(stateType)), 0, 0};
-        DataCopyPad(finalStateGm_[stateOffset], stateOutLocal, stateOutParams);
+        if (stateVFirst_) {
+            uint64_t stateOffset = ((stateSlot * NV_ + head) * realV_ + vOffset) * realK_;
+            DataCopyParams stateOutParams{static_cast<uint16_t>(curSingleV),
+                                          static_cast<uint16_t>(realK_ * sizeof(stateType)), 0, 0};
+            DataCopyPad(finalStateGm_[stateOffset], stateOutLocal, stateOutParams);
+        } else {
+            SyncVToS();
+            for (uint32_t v = 0; v < curSingleV; ++v) {
+                for (uint32_t k = 0; k < realK_; ++k) {
+                    uint64_t stateOffset = ((stateSlot * NV_ + head) * realK_ + k) * realV_ + vOffset + v;
+                    finalStateGm_.SetValue(stateOffset, stateOutLocal.GetValue(v * alignK_ + k));
+                }
+            }
+        }
         stateOutQueue_.FreeTensor(stateOutLocal);
     }
 
@@ -680,19 +706,17 @@ private:
         }
         uint64_t nextVOffset = 0;
         uint32_t nextSingleV = realV_ > vStep_ ? vStep_ : realV_;
-        uint64_t nextStateOffset = ((stateSlot * NV_ + head_i) * realV_) * realK_;
-        PrefetchState(nextStateOffset, nextSingleV);
+        PrefetchState(stateSlot, head_i, 0, nextSingleV);
         for (uint64_t v_i = 0; v_i < realV_; v_i += vStep_) {
             uint32_t curSingleV = v_i + vStep_ > realV_ ? realV_ - v_i : vStep_;
             LoadPrefetchedState(curSingleV);
             nextVOffset = v_i + vStep_;
             if (nextVOffset < realV_) {
                 nextSingleV = nextVOffset + vStep_ > realV_ ? realV_ - nextVOffset : vStep_;
-                nextStateOffset = ((stateSlot * NV_ + head_i) * realV_ + nextVOffset) * realK_;
-                PrefetchState(nextStateOffset, nextSingleV);
+                PrefetchState(stateSlot, head_i, nextVOffset, nextSingleV);
             }
             uint64_t pendingAttnOffset = 0;
-            uint64_t pendingStateOffset = 0;
+            uint64_t pendingStateSlot = 0;
             bool hasPendingAttn = false;
             bool hasPendingState = false;
             for (int64_t seq_i = seq0; seq_i < seq1; seq_i++) {
@@ -701,7 +725,7 @@ private:
                 uint64_t curVOffset = static_cast<uint64_t>(seq_i - seq0) * alignV_ + v_i;
                 uint64_t attnOffset = (static_cast<uint64_t>(seq_i) * NV_ + head_i) * realV_ + v_i;
                 uint64_t curStateSlot = StateSlotForToken(batchIdx, seq0, seq_i);
-                uint64_t curStateOutOffset = ((curStateSlot * NV_ + head_i) * realV_ + v_i) * realK_;
+                uint64_t curStateOutSlot = curStateSlot;
                 beta_ = LoadBeta(gbOffset);
                 Compute(curSingleV, curQKOffset, curVOffset);
                 if (attnOutBufferNum_ == BUFFER_NUM) {
@@ -714,12 +738,12 @@ private:
                     hasPendingAttn = true;
                 }
                 if (stateOutBufferNum_ == BUFFER_NUM) {
-                    CopyOutState(curStateOutOffset, curSingleV);
+                    CopyOutState(curStateOutSlot, head_i, v_i, curSingleV);
                 } else {
                     if (hasPendingState) {
-                        CopyOutState(pendingStateOffset, curSingleV);
+                        CopyOutState(pendingStateSlot, head_i, v_i, curSingleV);
                     }
-                    pendingStateOffset = curStateOutOffset;
+                    pendingStateSlot = curStateOutSlot;
                     hasPendingState = true;
                 }
             }
@@ -727,7 +751,7 @@ private:
                 CopyOutAttn(pendingAttnOffset, curSingleV);
             }
             if (hasPendingState) {
-                CopyOutState(pendingStateOffset, curSingleV);
+                CopyOutState(pendingStateSlot, head_i, v_i, curSingleV);
             }
         }
         gateInQueue_.FreeTensor(gateInUb);
@@ -801,6 +825,7 @@ private:
     bool useBetaSigmoid_;
     bool allowNegEigval_;
     bool safeGate_;
+    bool stateVFirst_;
     bool useAddFoldReduce_;
     float beta_;
     float scale_;

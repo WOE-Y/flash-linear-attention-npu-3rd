@@ -49,6 +49,8 @@ struct alignas(8) RecurrentKdaTilingData {
     uint32_t allowNegEigval;
     uint32_t safeGate;
     uint32_t stateVFirst;
+    uint32_t outputFinalState;
+    uint32_t inplaceFinalState;
 };
 #pragma pack(pop)
 

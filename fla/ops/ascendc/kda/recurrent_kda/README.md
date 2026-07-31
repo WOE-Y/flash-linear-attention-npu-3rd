@@ -1,9 +1,8 @@
 # RecurrentKda
 
-`RecurrentKda` 是 KDA 的 fused recurrent 前向算子。算子在一个 AICore kernel 内完成 recurrent state decay、delta 更新和输出计算；`raw gate -> log gate` 和 `beta sigmoid` 可以在 kernel 内完成，不依赖 `KdaGateCumsum` 或 GDN recurrent 的接口。
+`RecurrentKda` 是 KDA 的 fused recurrent 前向算子。在一个 AIV kernel 内完成 Q/K L2 normalize、raw gate 转换、beta sigmoid、state decay、delta 更新、输出计算与 state 写回，功能语义对齐 `fused_recurrent_kda_fwd`。
 
-完整接口和调用示例见 [API 文档](docs/api.md)，实现方案见 [设计文档](docs/design.md)。Shape 符号统一引用
-[KDA 模型符号表](../README.md#model-shape-symbols)。
+完整 aclnn 4.0 接口见 [API 文档](docs/api.md)，实现方案见 [设计文档](docs/design.md)。
 
 ## Python 接口
 
@@ -18,7 +17,7 @@ out, final_state = recurrent_kda(
     beta,
     initial_state=None,
     *,
-    cu_seqlens,
+    cu_seqlens=None,
     ssm_state_indices=None,
     A_log=None,
     dt_bias=None,
@@ -26,37 +25,35 @@ out, final_state = recurrent_kda(
     layout="BSND",
     scale=None,
     output_final_state=False,
+    inplace_final_state=True,
     use_qk_l2norm_in_kernel=False,
     use_gate_in_kernel=False,
     use_beta_sigmoid_in_kernel=False,
     allow_neg_eigval=False,
     safe_gate=False,
     lower_bound=None,
-    state_v_first=True,
+    state_v_first=False,
 )
 ```
 
-## 语义
+## 主要语义
 
 - `layout="BSND"`：`q/k=[B,T,H,K]`，`v=[B,T,HV,V]`，`g=[B,T,HV,K]`，`beta=[B,T,HV]`。
 - `layout="TND"`：`q/k=[T,H,K]`，`v=[T,HV,V]`，`g=[T,HV,K]`，`beta=[T,HV]`。
-- `initial_state=None` 时，Python wrapper 会创建全零初始状态；显式传入时是原位更新的 state pool，shape 为 `[state_capacity,HV,V,K]`。当前仅支持 `state_v_first=True`。
-- `scale=None` 时，Python wrapper 使用 `K ** -0.5`。
-- `use_qk_l2norm_in_kernel=True` 时，kernel 内对每个 token 的 `q/k` 做 L2 normalize，然后对 `q` 乘 `scale`。
-- `use_gate_in_kernel=False` 时，`g` 被视为已经预计算好的 step log gate，kernel 使用 `exp(g)` 做 state decay。
-- `use_gate_in_kernel=True` 时，`g` 是 raw gate，必须传 `A_log`；可选 `dt_bias`。
-  - `safe_gate=False`：`gate = -exp(A_log) * softplus(g + dt_bias)`。
+- `state_v_first=True` 时 state 为 `[state_capacity,HV,V,K]`；默认 `False` 时为 `[state_capacity,HV,K,V]`。
+- `inplace_final_state=True` 时必须传 `initial_state`，递推结果原地写回该 tensor；为 `False` 时允许 `initial_state=None`，wrapper 使用 FP32 全零状态。
+- `output_final_state=True` 时返回 final state；否则第二个返回值为 `None`。
+- `cu_seqlens` 为可选 host 累积 offset，可传 Python 整数序列或 INT32/INT64 tensor；为空时 BSND 使用每个 batch 的定长边界，TND 视为一条序列。
+- `scale=None` 时使用 `K ** -0.5`。
+- `use_qk_l2norm_in_kernel=True` 时使用 `x / sqrt(sum(x*x) + 1e-6)` 对每个 token 的 q/k 归一化。
+- `use_gate_in_kernel=False` 时，`g` 是预计算的 step log gate。
+- `use_gate_in_kernel=True` 时必须传 `A_log`，可选 `dt_bias`：
+  - `safe_gate=False`：`gate = -exp(A_log) * softplus(g + dt_bias)`；
   - `safe_gate=True`：`gate = lower_bound * sigmoid(exp(A_log) * (g + dt_bias))`。
-- `use_beta_sigmoid_in_kernel=True` 时，kernel 使用 `sigmoid(beta)`；若 `allow_neg_eigval=True`，再乘 2。
-- Python/aclnn/legacy 入口支持非连续 `initial_state`。Python 主入口返回 `final_state` 时与输入保持相同
-  storage 和 stride；legacy Torch 入口只返回 `out`，最终状态通过 `initial_state` 原位更新。
-- `cu_seqlens` 是必传的同设备 INT32/INT64 tensor，shape 为 `[seq_num+1]`，使用与 fla-org 一致的
-  累积 offset 语义。首项必须为 0，末项等于有效 packed token 数且可小于图捕获的 token capacity，
-  相邻差值是各序列长度。host 不读取其值，兼容 ACLGraph capture/replay。
-- `ssm_state_indices` 支持 packed `[T]` 和 speculative `[seq_num,max_step]`。显式索引模式允许 `state_capacity > seq_num`，并仅更新命中的槽。
-- 空序列不读取索引或 state，适用于 packed batch 中的 padding sequence。
+- `use_beta_sigmoid_in_kernel=True` 时使用 `sigmoid(beta)`；`allow_neg_eigval=True` 时再乘 2。
+- `ssm_state_indices` 支持 packed `[T]` 和 speculative `[seq_num,max_step]` state slot 索引；`num_accepted_tokens` 用于 speculative decode。
 
-每个 token 的 recurrent 更新为：
+每个 token 的递推为：
 
 ```text
 S = exp(gate_t) * S
@@ -67,12 +64,19 @@ o_t = S @ (q_t * scale)
 
 ## 当前限制
 
-- `q/k/v/out` 仅支持 `BF16`。
-- `g/beta` Python 入口支持 `FP32/BF16/FP16`，aclnn 预处理后以 `FP32` 输入 kernel。
-- `A_log/dt_bias` 支持 `FP32`。
-- `cu_seqlens` 为必传、与 q 同设备的 INT32/INT64 Tensor；offset 必须单调不减，末项不得超过输入
-  token capacity，各相邻差值必须不超过 8。末项小于 capacity 时，仅有效 token 对应的输出和 state
-  更新有定义，padding tail 输出不作保证。
-- 仅支持 `layout="BSND"` 和 `layout="TND"`。
-- 仅支持 `state_v_first=True`，state layout 为 `[state_capacity, HV, V, K]`；底层 aclnn 接口要求显式传入可变 state。
-- `HV` 必须能被 `H` 整除；`H/HV <= 256`；`K/V` 仅支持 `K=128,V=128` 或 `K=128,V=256`。
+- 芯片：本次验收为 `ascend910b`。
+- `q/k/v/out`：BF16；`gate/beta` 公开入口支持 FP16/BF16/FP32，aclnn 内部转换为 FP32。
+- state：BF16 或 FP32。
+- `K=128`，`V=128` 或 `V=256`，且 `HV % H == 0`。
+- 仅支持 `BSND` 和 `TND`；每条 recurrent 序列长度不超过 8。
+- 不提供 `ssm_state_indices` 时，`state_capacity` 必须等于逻辑序列数。
+
+## 构建与验证
+
+按仓库 README 的方式 B 构建 `recurrent_kda` run 包与 Python wheel。验收入口：
+
+```bash
+python3 fla/ops/ascendc/kda/recurrent_kda/tests/pta/test_accuracy.py
+```
+
+开发过程中的编译和运行时问题见 [开发问题记录](docs/开发问题记录.md)。

@@ -39,13 +39,15 @@ const size_t ACC_TOKEN_INDEX = 10;
 
 const size_t ATTR_LAYOUT_INDEX = 0;
 const size_t ATTR_SCALE_INDEX = 1;
-const size_t ATTR_USE_QK_L2NORM_INDEX = 2;
-const size_t ATTR_USE_GATE_INDEX = 3;
-const size_t ATTR_USE_BETA_SIGMOID_INDEX = 4;
-const size_t ATTR_ALLOW_NEG_EIGVAL_INDEX = 5;
-const size_t ATTR_SAFE_GATE_INDEX = 6;
-const size_t ATTR_LOWER_BOUND_INDEX = 7;
-const size_t ATTR_STATE_V_FIRST_INDEX = 8;
+const size_t ATTR_OUTPUT_FINAL_STATE_INDEX = 2;
+const size_t ATTR_INPLACE_FINAL_STATE_INDEX = 3;
+const size_t ATTR_USE_QK_L2NORM_INDEX = 4;
+const size_t ATTR_USE_GATE_INDEX = 5;
+const size_t ATTR_USE_BETA_SIGMOID_INDEX = 6;
+const size_t ATTR_ALLOW_NEG_EIGVAL_INDEX = 7;
+const size_t ATTR_SAFE_GATE_INDEX = 8;
+const size_t ATTR_LOWER_BOUND_INDEX = 9;
+const size_t ATTR_STATE_V_FIRST_INDEX = 10;
 
 void RecurrentKdaTiling::InitCompileInfo()
 {
@@ -106,6 +108,8 @@ RecurrentKdaTilingContext RecurrentKdaTiling::BuildProcessorContext() const
     ctx.allowNegEigval = tilingData_.allowNegEigval;
     ctx.safeGate = tilingData_.safeGate;
     ctx.stateVFirst = tilingData_.stateVFirst;
+    ctx.outputFinalState = tilingData_.outputFinalState;
+    ctx.inplaceFinalState = tilingData_.inplaceFinalState;
     return ctx;
 }
 
@@ -302,6 +306,8 @@ ge::graphStatus RecurrentKdaTiling::GetAttrsInfo()
         return ge::GRAPH_FAILED;
     }
     tilingData_.scale = *attrs->GetAttrPointer<float>(ATTR_SCALE_INDEX);
+    tilingData_.outputFinalState = *attrs->GetAttrPointer<bool>(ATTR_OUTPUT_FINAL_STATE_INDEX) ? 1 : 0;
+    tilingData_.inplaceFinalState = *attrs->GetAttrPointer<bool>(ATTR_INPLACE_FINAL_STATE_INDEX) ? 1 : 0;
     tilingData_.useQkL2norm = *attrs->GetAttrPointer<bool>(ATTR_USE_QK_L2NORM_INDEX) ? 1 : 0;
     tilingData_.useGateInKernel = *attrs->GetAttrPointer<bool>(ATTR_USE_GATE_INDEX) ? 1 : 0;
     tilingData_.useBetaSigmoid = *attrs->GetAttrPointer<bool>(ATTR_USE_BETA_SIGMOID_INDEX) ? 1 : 0;
@@ -351,6 +357,8 @@ void RecurrentKdaTiling::PrintTilingData()
     OP_LOGD(context_->GetNodeName(), "allowNegEigval: [%u]", tilingData_.allowNegEigval);
     OP_LOGD(context_->GetNodeName(), "safeGate: [%u]", tilingData_.safeGate);
     OP_LOGD(context_->GetNodeName(), "stateVFirst: [%u]", tilingData_.stateVFirst);
+    OP_LOGD(context_->GetNodeName(), "outputFinalState: [%u]", tilingData_.outputFinalState);
+    OP_LOGD(context_->GetNodeName(), "inplaceFinalState: [%u]", tilingData_.inplaceFinalState);
 }
 
 ge::graphStatus RecurrentKdaTiling::CalUbSize()
