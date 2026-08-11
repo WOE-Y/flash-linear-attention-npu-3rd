@@ -1,0 +1,16 @@
+fla/ops/ascendc/kda/recurrent_kda/tests/ATK/README.md
+  h_6cd730cd904540 17,21
+fla/ops/ascendc/kda/recurrent_kda/tests/ATK/run_atk.sh
+  h_6cd730cd904540 51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "655616851ab19edf86dd7320ae86b7f3608da7e3",
+  "prompts": {},
+  "humans": {
+    "h_6cd730cd904540": {
+      "author": "WOE-Y <876362620@qq.com>"
+    }
+  }
+}
