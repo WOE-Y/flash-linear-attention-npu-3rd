@@ -1,0 +1,14 @@
+fla/ops/ascendc/kda/recurrent_kda/tests/ATK_GPU/executor_recurrent_kda_gpu.py
+  h_6cd730cd904540 284-285
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "1c27d95d87d4ba0b52365089d0ce3e32af4c6468",
+  "prompts": {},
+  "humans": {
+    "h_6cd730cd904540": {
+      "author": "WOE-Y <876362620@qq.com>"
+    }
+  }
+}
