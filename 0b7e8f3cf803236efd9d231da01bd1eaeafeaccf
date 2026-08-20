@@ -1,0 +1,40 @@
+fla/ops/ascendc/kda/recurrent_kda/tests/ATK/TEST_REPORT.md
+  s_dcc508264dddcc::t_e93e807e6616f7 8
+  s_dcc508264dddcc::t_58cf6375e4dd11 50,52
+  s_dcc508264dddcc::t_705df8d875f218 37-44
+  s_dcc508264dddcc::t_e195bfb4cdb623 48,51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "0b7e8f3cf803236efd9d231da01bd1eaeafeaccf",
+  "prompts": {},
+  "humans": {
+    "h_6cd730cd904540": {
+      "author": "WOE-Y <876362620@qq.com>"
+    }
+  },
+  "sessions": {
+    "s_dcc508264dddcc": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a79c82a431f1a4385bc2686",
+        "model": "DeepSeek-V4-Flash-Official"
+      },
+      "human_author": null,
+      "custom_attributes": {
+        "edit_kind": "file_edit",
+        "client_type": "ide",
+        "tool_type": "builtin",
+        "session_id": "6a79c82a431f1a4385bc2686",
+        "operation_id": "6a7b181df163b1f87945f90c",
+        "external_session_id": "6a79c82a431f1a4385bc2686",
+        "dedupe_key": "6a79c82a431f1a4385bc2686:6a7b181df163b1f87945f90c:afterEdit:66304bd4",
+        "tool_id": "icube:applyChatSnapshotPatch",
+        "tool_use_id": "6a7b181df163b1f87945f90c",
+        "runtime_client": "trae-tob-git-ai",
+        "source_scene": "agent"
+      }
+    }
+  }
+}
