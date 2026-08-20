@@ -1,0 +1,16 @@
+tests/atk/recurrent_kda/atk_recurrent_kda.json
+  h_6cd730cd904540 1
+fla/ops/ascendc/kda/recurrent_kda/tests/pta/test_accuracy.py
+  h_6cd730cd904540 12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "5a85a7c95d242d4bb810393e3d9f016cf92b89e6",
+  "prompts": {},
+  "humans": {
+    "h_6cd730cd904540": {
+      "author": "WOE-Y <876362620@qq.com>"
+    }
+  }
+}
