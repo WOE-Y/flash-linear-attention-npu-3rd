@@ -1,0 +1,26 @@
+tests/atk/prepare_wy_repr_bwd_full/executor_prepare_wy_repr_bwd_full.py
+  s_d8e85f7fa5b689::t_7052113430ae6b 36-69,72,74,78-88,92,94,99-100,108-118,137,142,276-277
+tests/atk/prepare_wy_repr_bwd_full/prepare_wy_repr_bwd_full.yaml
+  s_d8e85f7fa5b689::t_cf1381ab52f833 7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "f4bf361df6f62240d23496ef918401bb743098a3",
+  "prompts": {},
+  "humans": {
+    "h_6cd730cd904540": {
+      "author": "WOE-Y <876362620@qq.com>"
+    }
+  },
+  "sessions": {
+    "s_d8e85f7fa5b689": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a8d528237b9b47e1d24dd12",
+        "model": "deepseek_v4_flash_official__dev"
+      },
+      "human_author": "WOE-Y <876362620@qq.com>"
+    }
+  }
+}
