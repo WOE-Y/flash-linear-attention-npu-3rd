@@ -1,0 +1,30 @@
+tests/atk/prepare_wy_repr_bwd_da/atk_prepare_wy_repr_bwd_da.json
+  s_d8e85f7fa5b689::t_0ff46281e4d226 1
+tests/atk/prepare_wy_repr_bwd_da/executor_prepare_wy_repr_bwd_da.py
+  s_d8e85f7fa5b689::t_865e1a0072bb5f 38,40,44-53,59
+tests/atk/prepare_wy_repr_bwd_da/gen_prepare_wy_repr_bwd_da.py
+  s_d8e85f7fa5b689::t_d7b8f65fc49501 6,8,22-246,252-254
+tests/atk/prepare_wy_repr_bwd_da/prepare_wy_repr_bwd_da.yaml
+  s_d8e85f7fa5b689::t_d3a089f21b8eb4 7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "0d079b72c0f72a77bcd778d049584e569409d915",
+  "prompts": {},
+  "humans": {
+    "h_6cd730cd904540": {
+      "author": "WOE-Y <876362620@qq.com>"
+    }
+  },
+  "sessions": {
+    "s_d8e85f7fa5b689": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a8d528237b9b47e1d24dd12",
+        "model": "deepseek_v4_flash_official__dev"
+      },
+      "human_author": "WOE-Y <876362620@qq.com>"
+    }
+  }
+}
