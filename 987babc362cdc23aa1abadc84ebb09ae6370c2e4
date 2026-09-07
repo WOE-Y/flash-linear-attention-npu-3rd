@@ -1,0 +1,39 @@
+fla/ops/ascendc/kda/recurrent_kda/op_host/recurrent_kda_tiling.h
+  s_4bca6f26315ccc::t_9a0375c008cd11 29
+fla/ops/ascendc/kda/recurrent_kda/op_host/recurrent_kda_tiling_processor.h
+  s_4bca6f26315ccc::t_fedc15f2470aae 53-54
+  s_4bca6f26315ccc::t_f9b094d61b40fa 103
+  s_4bca6f26315ccc::t_8570021c93472c 674-678
+fla/ops/ascendc/kda/recurrent_kda/op_host/recurrent_kda_tiling.cpp
+  s_4bca6f26315ccc::t_57d38327c8e074 141
+  s_4bca6f26315ccc::t_066b0129e951d4 65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "987babc362cdc23aa1abadc84ebb09ae6370c2e4",
+  "prompts": {},
+  "sessions": {
+    "s_4bca6f26315ccc": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a9e221b41e1f73eb07e8e70",
+        "model": "glm-5.3"
+      },
+      "human_author": "Your Name <you@example.com>",
+      "custom_attributes": {
+        "operation_id": "6a9e296b41e1f73eb07e8f3d",
+        "client_type": "ide",
+        "session_id": "6a9e221b41e1f73eb07e8e70",
+        "tool_type": "builtin",
+        "runtime_client": "trae-tob-git-ai",
+        "external_session_id": "6a9e221b41e1f73eb07e8e70",
+        "tool_id": "icube:applyChatSnapshotPatch",
+        "source_scene": "agent",
+        "tool_use_id": "6a9e296b41e1f73eb07e8f3d",
+        "dedupe_key": "6a9e221b41e1f73eb07e8e70:6a9e296b41e1f73eb07e8f3d:afterEdit:fedbbcf6",
+        "edit_kind": "file_edit"
+      }
+    }
+  }
+}
