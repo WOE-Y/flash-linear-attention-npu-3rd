@@ -1,0 +1,14 @@
+fla/ops/ascendc/kda/recurrent_kda/tests/operators/README.md
+  h_6cd730cd904540 5,10-14,16-20,23,28-33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "e54a2a2e6fde888b614d7bc4f4608af29d9d6bcf",
+  "prompts": {},
+  "humans": {
+    "h_6cd730cd904540": {
+      "author": "WOE-Y <876362620@qq.com>"
+    }
+  }
+}
