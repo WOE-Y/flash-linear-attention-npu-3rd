@@ -1,0 +1,37 @@
+fla/ops/ascendc/kda/recurrent_kda/op_host/op_api/aclnn_recurrent_kda.cpp
+  s_2be00b75b93a16::t_5bbe03f7d36778 517
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "b7153468c1fa6d7f5a346a995209e354b8145277",
+  "prompts": {},
+  "humans": {
+    "h_6cd730cd904540": {
+      "author": "WOE-Y <876362620@qq.com>"
+    }
+  },
+  "sessions": {
+    "s_2be00b75b93a16": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a9e61fd932d2800600cf616",
+        "model": "DeepSeek-V4-Flash-Official"
+      },
+      "human_author": "WOE-Y <876362620@qq.com>",
+      "custom_attributes": {
+        "session_id": "6a9e61fd932d2800600cf616",
+        "client_type": "ide",
+        "external_session_id": "6a9e61fd932d2800600cf616",
+        "dedupe_key": "6a9e61fd932d2800600cf616:6a9e65e4932d2800600cf6b9:afterEdit:a28e0f11",
+        "tool_type": "builtin",
+        "operation_id": "6a9e65e4932d2800600cf6b9",
+        "tool_use_id": "6a9e65e4932d2800600cf6b9",
+        "tool_id": "icube:applyChatSnapshotPatch",
+        "edit_kind": "file_edit",
+        "source_scene": "agent",
+        "runtime_client": "trae-tob-git-ai"
+      }
+    }
+  }
+}
