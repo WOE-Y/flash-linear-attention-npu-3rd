@@ -1,0 +1,25 @@
+fla/ops/ascendc/kda/recurrent_kda/op_host/recurrent_kda_tiling.cpp
+  h_6cd730cd904540 18,66
+  s_200e7847d8ddc8::t_b343e1551d3cc7 142
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "d56f64b6c164c844727d7241e592b5d6aa4bf0a5",
+  "prompts": {},
+  "humans": {
+    "h_6cd730cd904540": {
+      "author": "WOE-Y <876362620@qq.com>"
+    }
+  },
+  "sessions": {
+    "s_200e7847d8ddc8": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a9fd5881773d7abea964ce8",
+        "model": "deepseek_v4_flash_official__dev"
+      },
+      "human_author": "WOE-Y <876362620@qq.com>"
+    }
+  }
+}
