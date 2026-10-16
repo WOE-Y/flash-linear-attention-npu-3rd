@@ -8,14 +8,14 @@
  */
 
 /*!
- * \file recurrent_kda_tiling_processor.h
+ * \file recurrent_kda_arch35_tiling_processor.h
  * \brief Tiling processor shared by aclnn tiling and fast kernel launch.
  */
 
-#ifndef RECURRENT_KDA_TILING_PROCESSOR_H
-#define RECURRENT_KDA_TILING_PROCESSOR_H
+#ifndef RECURRENT_KDA_ARCH35_TILING_PROCESSOR_H
+#define RECURRENT_KDA_ARCH35_TILING_PROCESSOR_H
 
-#include "../op_kernel/recurrent_kda_struct.h"
+#include "../../../op_kernel/arch35/recurrent_kda_arch35_struct.h"
 #include "err/ops_err.h"
 #include "log/log.h"
 #include "register/op_impl_registry.h"
@@ -27,9 +27,9 @@
 #include <limits>
 #include <string>
 
-using RecurrentKdaTilingData = RecurrentKda::RecurrentKdaTilingData;
+namespace optiling::recurrent_kda_arch35 {
 
-namespace optiling {
+using RecurrentKdaTilingData = RecurrentKda::Arch35::RecurrentKdaTilingData;
 
 static constexpr size_t RKDA_RANK3_QKV_DIM_NUM = 3;
 static constexpr size_t RKDA_RANK4_QKV_DIM_NUM = 4;
@@ -100,7 +100,6 @@ struct RecurrentKdaTilingContext {
     bool hasStateOutStrides = false;
     uint64_t aivNum = 0;
     uint64_t ubSize = 0;
-    uint32_t isA5 = 0;
 };
 
 class RecurrentKdaTilingProcessor {
@@ -672,7 +671,7 @@ private:
     int64_t CalcComputeUbCoeff(int64_t aDk) const
     {
         int64_t coeff = 4 * aDk + 8; // state and row outputs.
-        if (ctx_.isA5 == 0 || aDk != RKDA_FUSED_REDUCE_K) {
+        if (aDk != RKDA_FUSED_REDUCE_K) {
             coeff += 4 * aDk; // broadTmp for the generic matvec path.
         }
         return coeff;
@@ -810,6 +809,6 @@ private:
     }
 };
 
-} // namespace optiling
+} // namespace optiling::recurrent_kda_arch35
 
-#endif // RECURRENT_KDA_TILING_PROCESSOR_H
+#endif // RECURRENT_KDA_ARCH35_TILING_PROCESSOR_H

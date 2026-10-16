@@ -8,16 +8,16 @@
  */
 
 /*!
- * \file recurrent_kda_tiling_data.h
+ * \file recurrent_kda_arch35_tiling_data.h
  * \brief
  */
-#ifndef RECURRENT_KDA_TILING_DATA_H
-#define RECURRENT_KDA_TILING_DATA_H
+#ifndef RECURRENT_KDA_ARCH35_TILING_DATA_H
+#define RECURRENT_KDA_ARCH35_TILING_DATA_H
 
-#include "recurrent_kda_struct.h"
+#include "recurrent_kda_arch35_struct.h"
 
 #ifndef TORCH_MODE
 #include "kernel_tiling/kernel_tiling.h"
 #endif
 
-#endif // RECURRENT_KDA_TILING_DATA_H
+#endif // RECURRENT_KDA_ARCH35_TILING_DATA_H

@@ -1,5 +1,7 @@
 # RecurrentKda 设计方案
 
+本次拆分架构实现，并修正缓存 EventID 的资源占用方式。保留既有 AIV-only 计算、任务映射、buffer、set/wait 协议；arch22 使用等价的余数递推与 head 步进减少 Scalar 扫描，不引入新的 Cube/Vector 协作。
+
 ## 1. 背景
 
 KDA recurrent 用于小步长 decode/MTP 场景，按 token 顺序更新 KDA 状态并生成输出。上游常用 API 支持
@@ -76,9 +78,9 @@ o_t = S @ q_t
   对规则非连续 Q/K/V 保留 stride/storage offset，已验证布局回退连续化，token/head 置换或
   正 stride 重叠 descriptor 明确拒绝；非连续 state 以
   `CreateView` 保留真实存储信息；创建 L0 executor。
-- `op_host/recurrent_kda_tiling.cpp`：读取 Q/K/V 与输入/输出 state stride、shape、属性和可选输入存在性，
-  填充 `RecurrentKdaTilingData`，计算 block dim 与 UB 切分。
-- `op_kernel/recurrent_kda.cpp`：单个 AIV kernel 完成 q/k normalize、raw gate 转换、state decay、delta 更新、输出和最终状态写回。
+- `op_host/recurrent_kda_tiling.cpp`：注册唯一 tiling 入口，根据 NPU 架构分发到 `op_tiling/arch22`（A2/A3）或 `op_tiling/arch35`（A5）。
+- 各架构分别读取 shape、stride、属性和可选输入，独立完成校验、block dim、UB 与 buffer profile 计算；不交叉包含实现或复用带架构分支的 processor。
+- `op_kernel/recurrent_kda.cpp`：仅按编译架构选择 `arch22/recurrent_kda_arch22.cpp` 或 `arch35/recurrent_kda_arch35.cpp`。各架构入口、kernel、tiling data 和命名空间独立，保留公开 kernel 符号及参数顺序。
 - `torch_custom/fla_npu/csrc/src/stable_recurrent_kda.cpp` + `fla_npu/ops/ascendc/_stable.py`：提供解耦的 Python 入口（Stable-ABI 适配层），不注册 legacy `torch.ops.npu`；`_aclnn_ctypes.py` 保留为参考实现与回退。
 - legacy `torch.ops.npu.npu_recurrent_kda` 不属于当前支持范围，不作为公共接口维护。
 
@@ -92,7 +94,11 @@ BSND 按 batch 行划分序列，TND 视为一条序列。接口面向 decode / 
 的差值（varlen 每段长度）与 dense 单序列长度均限制为 `<=8`。提供 `cu_seqlens` 时，末项表示有效 token 数，可小于图捕获的
 token capacity。
 
+arch22 保持 `(seq_idx * HV + head) % blockDim == blockIdx` 的任务归属。每核从 `firstHead=blockIdx` 开始，预先计算 `headShift=HV % blockDim`；处理每个序列前保存当前首次 head，再以 `firstHead >= headShift ? firstHead - headShift : firstHead + blockDim - headShift` 递推下一序列的首次 head。当前首次 head 超出 HV 时无任务，否则后续 head 以 blockDim 递增。空序列也推进该递推。它与原逐 head 扫描产生完全相同的列表及顺序；state 预取顺序、buffer 生命周期与核间 GM 所有权均不变。arch35 保留自己的任务枚举实现。
+
 ### 6.2 Tiling Data
+
+arch22 和 arch35 分别维护私有 `RecurrentKdaTilingData`；首次拆分保持字段顺序、类型、8 字节对齐与 256 字节序列化大小不变。host 和 kernel 分别引用本架构数据定义。
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
@@ -144,6 +150,8 @@ tiling data 驱动，避免把 runtime shape 组合扩张到 tiling key。
 任务分配保证每个 `(seq/value head)` 的输出区域独立。`--cce-auto-sync=off` 保持不变，UB 复用由本 kernel 内顺序和
 必要的 vector pipe barrier 维护，不依赖 GDN recurrent 的同步协议。
 
+arch22 在初始化时用 `AllocEventID<HardEvent::V_S>()` 占用 V_S，并在 `ReleaseEvents()` 中释放；该方向不与输入／输出队列共用。MTE2_V、V_MTE2、V_MTE3、MTE3_V 在每次同步时临时 `FetchEventID`，立即以同类型、同 ID 完成 set/wait，期间不分配队列资源，也不缓存或释放未占用的 ID。arch35 的五个缓存事件分别在首次使用时 `AllocEventID`，在 `ReleaseEvents()` 中逐项释放。`FetchEventID` 只查看空闲 ID，不适合长期缓存，否则后续 TQue 分配可能复用该 ID。两架构各自维护事件生命周期，不新增事件方向或同步对。
+
 ### 7.4 边界处理
 
 - 提供 `cu_seqlens` 时，首项必须为 0，offset 必须单调不减，末项为有效 token 数且不得超过输入 token
@@ -157,9 +165,9 @@ tiling data 驱动，避免把 runtime shape 组合扩张到 tiling key。
 
 | 平台 | SOC | 实现策略 | 分支差异 |
 | --- | --- | --- | --- |
-| A2 | `ascend910b` | 公共 AIV kernel | 无 |
-| A3 | `ascend910_93` | 公共 AIV kernel | 无 |
-| A5 | `ascend950` | arch35 特化 AIV kernel | RegBase/DataCopy 路径，并对 `K=128` 使用融合归约实现 |
+| A2 | `ascend910b` | arch22 独立 tiling / AIV kernel | 通用向量归约与 broadTmp UB 预算 |
+| A3 | `ascend910_93` | arch22 独立 tiling / AIV kernel | 与 A2 共用 arch22 实现 |
+| A5 | `ascend950` | arch35 独立 tiling / AIV kernel | RegBase/DataCopy 路径，并对 `K=128` 使用融合归约实现 |
 
 ## 9. 精度设计
 

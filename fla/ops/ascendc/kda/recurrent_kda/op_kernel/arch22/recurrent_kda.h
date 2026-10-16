@@ -12,14 +12,14 @@
  * \brief Single-kernel fused recurrent KDA implementation.
  */
 
-#ifndef __RECURRENT_KDA_KERNEL_H_
-#define __RECURRENT_KDA_KERNEL_H_
+#ifndef RECURRENT_KDA_ARCH22_KERNEL_H
+#define RECURRENT_KDA_ARCH22_KERNEL_H
 
 #include "kernel_operator.h"
 #include "lib/matmul_intf.h"
-#include "recurrent_kda_tiling_data.h"
+#include "recurrent_kda_arch22_tiling_data.h"
 
-namespace RecurrentKda {
+namespace RecurrentKda::Arch22 {
 
 using namespace matmul;
 using namespace AscendC;
@@ -110,11 +110,7 @@ public:
         restUbSize_ = tilingData->ubRestBytes;
         alignK_ = Ceil(tilingData->dk, BF16_NUM_PER_BLOCK) * BF16_NUM_PER_BLOCK;
         alignV_ = Ceil(tilingData->dv, BF16_NUM_PER_BLOCK) * BF16_NUM_PER_BLOCK;
-        eventMte2ToVInitialized_ = false;
-        eventVToMte2Initialized_ = false;
         eventVToSInitialized_ = false;
-        eventVToMte3Initialized_ = false;
-        eventMte3ToVInitialized_ = false;
     }
 
     __aicore__ inline void Init(const RKDAInitParams &initParams, TPipe *pipe)
@@ -127,6 +123,8 @@ public:
         pipe_ = pipe;
         SetGlobalTensors(initParams);
         InitLocalBuffers();
+        eventIdVToS_ = GetTPipePtr()->AllocEventID<HardEvent::V_S>();
+        eventVToSInitialized_ = true;
     }
 
     __aicore__ inline void SetGlobalTensors(const RKDAInitParams &initParams)
@@ -195,77 +193,47 @@ public:
         gateInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
     }
 
+    // Queue-related events are borrowed only for an immediate set/wait pair.
+    // V_S is reserved once; the input/output queues do not consume that direction.
     __aicore__ inline void SyncMte2ToV()
     {
-        if (!eventMte2ToVInitialized_) {
-            eventIdMte2ToV_ = GetTPipePtr()->FetchEventID(HardEvent::MTE2_V);
-            eventMte2ToVInitialized_ = true;
-        }
-        SetFlag<HardEvent::MTE2_V>(eventIdMte2ToV_);
-        WaitFlag<HardEvent::MTE2_V>(eventIdMte2ToV_);
+        const TEventID eventId = GetTPipePtr()->FetchEventID(HardEvent::MTE2_V);
+        SetFlag<HardEvent::MTE2_V>(eventId);
+        WaitFlag<HardEvent::MTE2_V>(eventId);
     }
 
     __aicore__ inline void SyncVToMte2()
     {
-        if (!eventVToMte2Initialized_) {
-            eventIdVToMte2_ = GetTPipePtr()->FetchEventID(HardEvent::V_MTE2);
-            eventVToMte2Initialized_ = true;
-        }
-        SetFlag<HardEvent::V_MTE2>(eventIdVToMte2_);
-        WaitFlag<HardEvent::V_MTE2>(eventIdVToMte2_);
+        const TEventID eventId = GetTPipePtr()->FetchEventID(HardEvent::V_MTE2);
+        SetFlag<HardEvent::V_MTE2>(eventId);
+        WaitFlag<HardEvent::V_MTE2>(eventId);
     }
 
     __aicore__ inline void SyncVToS()
     {
-        if (!eventVToSInitialized_) {
-            eventIdVToS_ = GetTPipePtr()->FetchEventID(HardEvent::V_S);
-            eventVToSInitialized_ = true;
-        }
         SetFlag<HardEvent::V_S>(eventIdVToS_);
         WaitFlag<HardEvent::V_S>(eventIdVToS_);
     }
 
     __aicore__ inline void SyncVToMte3()
     {
-        if (!eventVToMte3Initialized_) {
-            eventIdVToMte3_ = GetTPipePtr()->FetchEventID(HardEvent::V_MTE3);
-            eventVToMte3Initialized_ = true;
-        }
-        SetFlag<HardEvent::V_MTE3>(eventIdVToMte3_);
-        WaitFlag<HardEvent::V_MTE3>(eventIdVToMte3_);
+        const TEventID eventId = GetTPipePtr()->FetchEventID(HardEvent::V_MTE3);
+        SetFlag<HardEvent::V_MTE3>(eventId);
+        WaitFlag<HardEvent::V_MTE3>(eventId);
     }
 
     __aicore__ inline void SyncMte3ToV()
     {
-        if (!eventMte3ToVInitialized_) {
-            eventIdMte3ToV_ = GetTPipePtr()->FetchEventID(HardEvent::MTE3_V);
-            eventMte3ToVInitialized_ = true;
-        }
-        SetFlag<HardEvent::MTE3_V>(eventIdMte3ToV_);
-        WaitFlag<HardEvent::MTE3_V>(eventIdMte3ToV_);
+        const TEventID eventId = GetTPipePtr()->FetchEventID(HardEvent::MTE3_V);
+        SetFlag<HardEvent::MTE3_V>(eventId);
+        WaitFlag<HardEvent::MTE3_V>(eventId);
     }
 
     __aicore__ inline void ReleaseEvents()
     {
-        if (eventMte2ToVInitialized_) {
-            GetTPipePtr()->ReleaseEventID<HardEvent::MTE2_V>(eventIdMte2ToV_);
-            eventMte2ToVInitialized_ = false;
-        }
-        if (eventVToMte2Initialized_) {
-            GetTPipePtr()->ReleaseEventID<HardEvent::V_MTE2>(eventIdVToMte2_);
-            eventVToMte2Initialized_ = false;
-        }
         if (eventVToSInitialized_) {
             GetTPipePtr()->ReleaseEventID<HardEvent::V_S>(eventIdVToS_);
             eventVToSInitialized_ = false;
-        }
-        if (eventVToMte3Initialized_) {
-            GetTPipePtr()->ReleaseEventID<HardEvent::V_MTE3>(eventIdVToMte3_);
-            eventVToMte3Initialized_ = false;
-        }
-        if (eventMte3ToVInitialized_) {
-            GetTPipePtr()->ReleaseEventID<HardEvent::MTE3_V>(eventIdMte3ToV_);
-            eventMte3ToVInitialized_ = false;
         }
     }
 
@@ -275,7 +243,12 @@ public:
             ReleaseEvents();
             return;
         }
+        const uint64_t coreNum = GetBlockNum();
+        const uint64_t headShift = NV_ % coreNum;
+        uint64_t firstHead = blockIdx;
         for (uint64_t batch_i = 0; batch_i < B_; batch_i++) {
+            const uint64_t taskHead = firstHead;
+            firstHead = firstHead >= headShift ? firstHead - headShift : firstHead + coreNum - headShift;
             int64_t seq0 = SequenceStart(batch_i);
             int64_t seq1 = SequenceEnd(batch_i);
             int64_t seqLen64 = seq1 - seq0;
@@ -288,7 +261,7 @@ public:
                 return;
             }
 
-            uint64_t head_i = FindNextTaskHead(batch_i, 0);
+            uint64_t head_i = taskHead < NV_ ? taskHead : NV_;
             if (head_i == NV_) {
                 continue;
             }
@@ -300,7 +273,10 @@ public:
             CopyInBeta(seq0, seq1);
             bool statePrefetched = false;
             while (head_i < NV_) {
-                uint64_t nextHead = FindNextTaskHead(batch_i, head_i + 1);
+                uint64_t nextHead = head_i + coreNum;
+                if (nextHead >= NV_) {
+                    nextHead = NV_;
+                }
                 statePrefetched = ProcessHead(batch_i, seq0, seq1, head_i, stateSlot,
                                               statePrefetched, nextHead < NV_, stateSlot, nextHead);
                 head_i = nextHead;
@@ -1013,20 +989,6 @@ private:
         return nextStatePrefetched;
      }
 
-    __aicore__ inline uint64_t FindNextTaskHead(uint64_t batchIdx, uint64_t startHead) const
-    {
-        for (uint64_t head = startHead; head < NV_; ++head) {
-            if (IsCurrentTask(batchIdx, head)) {
-                return head;
-            }
-        }
-        return NV_;
-    }
-
-    __aicore__ inline bool IsCurrentTask(uint64_t batchIdx, uint64_t headIdx) const
-    {
-        return ((batchIdx * NV_ + headIdx) % GetBlockNum()) == blockIdx;
-    }
 
 private:
     GlobalTensor<inType> queryGm_;
@@ -1070,16 +1032,8 @@ private:
     LocalTensor<float> broadTmpInUb;
     LocalTensor<float> attnInUb;
     LocalTensor<float> stateInUb;
-    TEventID eventIdMte2ToV_;
-    TEventID eventIdVToMte2_;
     TEventID eventIdVToS_;
-    TEventID eventIdVToMte3_;
-    TEventID eventIdMte3ToV_;
-    bool eventMte2ToVInitialized_;
-    bool eventVToMte2Initialized_;
     bool eventVToSInitialized_;
-    bool eventVToMte3Initialized_;
-    bool eventMte3ToVInitialized_;
     uint32_t B_;
     uint32_t T_;
     uint32_t seqLen_;
@@ -1132,5 +1086,5 @@ private:
     float lowerBound_;
     uint64_t blockIdx;
 };
-} // namespace RecurrentKda
+} // namespace RecurrentKda::Arch22
 #endif

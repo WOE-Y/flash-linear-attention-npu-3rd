@@ -8,16 +8,16 @@
  */
 
 /*!
- * \file recurrent_kda_struct.h
+ * \file recurrent_kda_arch35_struct.h
  * \brief Plain tiling struct shared by aclnn tiling and fast kernel launch.
  */
 
-#ifndef RECURRENT_KDA_STRUCT_H
-#define RECURRENT_KDA_STRUCT_H
+#ifndef RECURRENT_KDA_ARCH35_STRUCT_H
+#define RECURRENT_KDA_ARCH35_STRUCT_H
 
 #include <cstdint>
 
-namespace RecurrentKda {
+namespace RecurrentKda::Arch35 {
 
 #pragma pack(push, 8)
 struct alignas(8) RecurrentKdaTilingData {
@@ -74,6 +74,6 @@ struct alignas(8) RecurrentKdaTilingData {
 };
 #pragma pack(pop)
 
-} // namespace RecurrentKda
+} // namespace RecurrentKda::Arch35
 
-#endif // RECURRENT_KDA_STRUCT_H
+#endif // RECURRENT_KDA_ARCH35_STRUCT_H

@@ -7,6 +7,39 @@
 回退策略与实测结果见 [QKV 专项设计](docs/non_contiguous_qkv_design.md)。Shape 符号统一引用
 [KDA 模型符号表](../README.md#model-shape-symbols)。
 
+## 架构组织
+
+公共 host 入口按 NPU 架构分流，公共 kernel 文件按编译架构选择实现。两侧的 tiling、资源策略、kernel 与 tiling data 分别维护，架构目录之间不互相包含实现。
+
+```text
+op_host/
+├── recurrent_kda_tiling.cpp
+├── recurrent_kda_tiling.h
+└── op_tiling/
+    ├── arch22/  # A2 / A3
+    │   ├── recurrent_kda_arch22_tiling.cpp
+    │   ├── recurrent_kda_arch22_tiling.h
+    │   └── recurrent_kda_arch22_tiling_processor.h
+    └── arch35/  # A5
+        ├── recurrent_kda_arch35_tiling.cpp
+        ├── recurrent_kda_arch35_tiling.h
+        └── recurrent_kda_arch35_tiling_processor.h
+op_kernel/
+├── recurrent_kda.cpp
+├── arch22/
+│   ├── recurrent_kda_arch22.cpp
+│   ├── recurrent_kda.h
+│   ├── recurrent_kda_arch22_struct.h
+│   └── recurrent_kda_arch22_tiling_data.h
+└── arch35/
+    ├── recurrent_kda_arch35.cpp
+    ├── recurrent_kda.h
+    ├── recurrent_kda_arch35_struct.h
+    └── recurrent_kda_arch35_tiling_data.h
+```
+
+架构拆分的构建、精度和性能状态见[验证记录](docs/arch_split_validation.md)。
+
 ## Python 接口
 
 ```python

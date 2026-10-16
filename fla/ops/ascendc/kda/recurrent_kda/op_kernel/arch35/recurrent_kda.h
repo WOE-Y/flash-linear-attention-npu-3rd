@@ -12,14 +12,14 @@
  * \brief Single-kernel fused recurrent KDA implementation.
  */
 
-#ifndef __RECURRENT_KDA_KERNEL_H_
-#define __RECURRENT_KDA_KERNEL_H_
+#ifndef RECURRENT_KDA_ARCH35_KERNEL_H
+#define RECURRENT_KDA_ARCH35_KERNEL_H
 
 #include "kernel_operator.h"
 #include "lib/matmul_intf.h"
-#include "../recurrent_kda_tiling_data.h"
+#include "recurrent_kda_arch35_tiling_data.h"
 
-namespace RecurrentKda {
+namespace RecurrentKda::Arch35 {
 
 using namespace matmul;
 using namespace AscendC;
@@ -202,10 +202,11 @@ public:
         gateInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
     }
 
+    // Cached event IDs stay owned until ReleaseEvents; FetchEventID does not reserve them.
     __aicore__ inline void SyncMte2ToV()
     {
         if (!eventMte2ToVInitialized_) {
-            eventIdMte2ToV_ = GetTPipePtr()->FetchEventID(HardEvent::MTE2_V);
+            eventIdMte2ToV_ = GetTPipePtr()->AllocEventID<HardEvent::MTE2_V>();
             eventMte2ToVInitialized_ = true;
         }
         SetFlag<HardEvent::MTE2_V>(eventIdMte2ToV_);
@@ -215,7 +216,7 @@ public:
     __aicore__ inline void SyncVToMte2()
     {
         if (!eventVToMte2Initialized_) {
-            eventIdVToMte2_ = GetTPipePtr()->FetchEventID(HardEvent::V_MTE2);
+            eventIdVToMte2_ = GetTPipePtr()->AllocEventID<HardEvent::V_MTE2>();
             eventVToMte2Initialized_ = true;
         }
         SetFlag<HardEvent::V_MTE2>(eventIdVToMte2_);
@@ -225,7 +226,7 @@ public:
     __aicore__ inline void SyncVToS()
     {
         if (!eventVToSInitialized_) {
-            eventIdVToS_ = GetTPipePtr()->FetchEventID(HardEvent::V_S);
+            eventIdVToS_ = GetTPipePtr()->AllocEventID<HardEvent::V_S>();
             eventVToSInitialized_ = true;
         }
         SetFlag<HardEvent::V_S>(eventIdVToS_);
@@ -235,7 +236,7 @@ public:
     __aicore__ inline void SyncVToMte3()
     {
         if (!eventVToMte3Initialized_) {
-            eventIdVToMte3_ = GetTPipePtr()->FetchEventID(HardEvent::V_MTE3);
+            eventIdVToMte3_ = GetTPipePtr()->AllocEventID<HardEvent::V_MTE3>();
             eventVToMte3Initialized_ = true;
         }
         SetFlag<HardEvent::V_MTE3>(eventIdVToMte3_);
@@ -245,7 +246,7 @@ public:
     __aicore__ inline void SyncMte3ToV()
     {
         if (!eventMte3ToVInitialized_) {
-            eventIdMte3ToV_ = GetTPipePtr()->FetchEventID(HardEvent::MTE3_V);
+            eventIdMte3ToV_ = GetTPipePtr()->AllocEventID<HardEvent::MTE3_V>();
             eventMte3ToVInitialized_ = true;
         }
         SetFlag<HardEvent::MTE3_V>(eventIdMte3ToV_);
@@ -1363,5 +1364,5 @@ private:
     float lowerBound_;
     uint64_t blockIdx;
 };
-} // namespace RecurrentKda
+} // namespace RecurrentKda::Arch35
 #endif
