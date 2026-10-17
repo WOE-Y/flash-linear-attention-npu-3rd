@@ -419,7 +419,7 @@ racecheck/memcheck 在记录的代表范围无错误；initcheck PRIVATE 报告�
 
 ### 14.9 A2/A3 L2Norm epsilon 修复
 
-NormalizeRows 的顺序为 Mul → ReduceSum → Adds(1e-6f) → Sqrt →
+24b44ae1 中逐行 NormalizeRows 的顺序为 Mul → ReduceSum → Adds(1e-6f) → Sqrt →
 V_S → Scalar 倒数 → Muls；各有依赖的 V 指令间保留 PIPE_V barrier。
 CPU 标杆以 PyTorch 显式平方和、加 epsilon、开方和相除表达同一公式，
 取代 F.normalize 的 norm clamp。Q 的 scale 时机保持在归一化之后。
@@ -428,3 +428,46 @@ CPU 标杆以 PyTorch 显式平方和、加 epsilon、开方和相除表达同�
 没有新增跨核依赖；现有 FP32 deltaInUb 标量槽存放加 epsilon 后的平方和。
 每个有效 Q/K 行各增加一次标量元素 Adds 和相应 V barrier，性能代价由八模型实测。
 数值正确性以竞品公式为依据，不为保持旧时延删除 epsilon。
+
+
+### 14.10 A2/A3 批量 Q/K L2Norm 与单次 V_S
+
+本节替换公共 kernel 的逐行归一化调度，数学公式和 A5 实现不变。
+每个 head 的有效行数 L=seqLen，范围 1..8。Q/K 仍各占独立的 MAX_MTP 行平面，
+只处理当前 head，不跨 head 合并 FP32 数据。Q 的 scale 保持独立后置。
+
+顺序为批量 Q² → Q 逐行归约 → 批量 K² → K 逐行归约 →
+两组平方和加 1e-6 → 两组 Sqrt → 一次 V_S → Scalar 倒数与逐行 Muls →
+PIPE_V → 原有 Q scale。K=128 继续使用原 AddFold + WholeReduceSum 行归约树，
+调用 rows=L，不合并不同 token/head 的归约维。FP32 dtype、epsilon、倒数和 scale
+运算顺序保持不变，零向量和小范数语义继承 14.9。
+
+预处理期间复用 broadTmpInUb[0,L*alignK) 存 Q² 或 K²；
+deltaInUb[0,L) 存 Q 范数，attnInUb[0,L) 存 K 范数。
+host 保证 vStep>=8，而 L<=8，因此平方 scratch 与两组范数均在现有 slice 内。
+Q/K 范数各至多 32 B，按各自 slice 的原 32 B 对齐起点存放。
+它们在本 head 的 state 计算前已全部被 Scalar 消费，随后恢复 delta/attn 的原语义。
+不复用 scalarBuf 的 Exp 和 Beta 两个 block，不修改 UB 总分配、guard 或 host。
+
+B=1、H=HV=96、K=V=128、BF16 state、vStep=64 时：
+UB[89344,89600) delta，其中 [89344,89376) 为 Q 范数；
+UB[89600,89856) attn，其中 [89600,89632) 为 K 范数；
+UB[134912,167680) broadTmp，其中至多前 4096 B 为当前平方值。
+其它 UB 区间与 14.7 保持一致，总分配仍为 174912 B。
+其它 profile 的绝对起点按 InitLocalBuffers 变化，以上相对容量与不重叠约束不变。
+
+同步闭环：
+1. 已有 packed DeQue/Cast 提供 Q/K ready，不改变 raw 槽释放和下一 head 预取。
+2. Q² 写完 PIPE_V 后归约；Q 归约结束 PIPE_V 后才允许 K² 覆盖同一 scratch，
+   防止 WholeReduceSum 仍读取 Q² 时被覆盖。
+3. K²→归约、归约→Adds、Adds→Sqrt 各保留必要 PIPE_V；Q/K 的独立 norm 操作可并列提交。
+4. 两组 Sqrt 完成后使用现有 V_S event 成对 Set/Wait，然后 Scalar 读取两组结果。
+   每 head 仅一次 L2Norm V_S，不增加 EventID；其它 gate/Beta 的 V_S 保持原样。
+5. Scalar 只读取 norm，不向 UB 写回倒数；逐行 Q/K Muls 的地址互不重叠，
+   循环末尾统一 PIPE_V，再执行独立 Q scale 及其原屏障。
+6. gate 和 state 阶段之后可复用上述 scratch；无跨核共享或新 GM 搬运。
+   空序列沿用 Process 的跳过逻辑，关闭 L2Norm 时不生产或读取范数。
+
+默认 K=128 的源码层统计：L=1/4/8 时，L2Norm V_S 分别由 2/8/16 次变为 1 次，
+Vector API 调用分别由 12/48/96 变为 12/18/26（不含 Q scale 和同步）。
+收益需以同卡 msopprof 实测确认；不能把 Wait 所含的必要 V 计算直接算作可消除耗时。

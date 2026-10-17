@@ -461,25 +461,41 @@ private:
         return 1.0f / denom;
     }
 
-    __aicore__ inline void NormalizeRows(LocalTensor<float> &tensor, int32_t seqLen)
+    __aicore__ inline void NormalizeQKRows(int32_t seqLen)
     {
-        for (int32_t row = 0; row < seqLen; ++row) {
-            uint32_t rowOffset = static_cast<uint32_t>(row) * alignK_;
-            Mul(broadTmpInUb, tensor[rowOffset], tensor[rowOffset], alignK_);
-            PipeBarrier<PIPE_V>();
-            ReduceSumDispatch(deltaInUb, broadTmpInUb, 1);
-            PipeBarrier<PIPE_V>();
-            Adds(deltaInUb, deltaInUb, QK_L2NORM_EPS, 1);
-            PipeBarrier<PIPE_V>();
-            Sqrt(deltaInUb, deltaInUb, 1);
-            PipeBarrier<PIPE_V>();
-            SyncVToS();
-            float norm = deltaInUb.GetValue(0);
-            if (norm > 0.0f) {
-                Muls(tensor[rowOffset], tensor[rowOffset], 1.0f / norm, alignK_);
-                PipeBarrier<PIPE_V>();
+        const uint32_t rows = static_cast<uint32_t>(seqLen);
+        const uint32_t elements = rows * alignK_;
+        // L <= MAX_MTP <= vStep: the existing scratch and norm slices are sufficient.
+        Mul(broadTmpInUb, qInUb, qInUb, elements);
+        PipeBarrier<PIPE_V>();
+        ReduceSumDispatch(deltaInUb, broadTmpInUb, rows);
+        // The Q reduction must finish reading before K overwrites the square scratch.
+        PipeBarrier<PIPE_V>();
+        Mul(broadTmpInUb, kInUb, kInUb, elements);
+        PipeBarrier<PIPE_V>();
+        ReduceSumDispatch(attnInUb, broadTmpInUb, rows);
+        PipeBarrier<PIPE_V>();
+        Adds(deltaInUb, deltaInUb, QK_L2NORM_EPS, rows);
+        Adds(attnInUb, attnInUb, QK_L2NORM_EPS, rows);
+        PipeBarrier<PIPE_V>();
+        Sqrt(deltaInUb, deltaInUb, rows);
+        Sqrt(attnInUb, attnInUb, rows);
+        PipeBarrier<PIPE_V>();
+        SyncVToS();
+
+        for (uint32_t row = 0; row < rows; ++row) {
+            const uint32_t rowOffset = row * alignK_;
+            const float qNorm = deltaInUb.GetValue(row);
+            const float kNorm = attnInUb.GetValue(row);
+            if (qNorm > 0.0f) {
+                Muls(qInUb[rowOffset], qInUb[rowOffset], 1.0f / qNorm, alignK_);
+            }
+            if (kNorm > 0.0f) {
+                Muls(kInUb[rowOffset], kInUb[rowOffset], 1.0f / kNorm, alignK_);
             }
         }
+        // All row outputs must be ready for the independent Q scale and later compute.
+        PipeBarrier<PIPE_V>();
     }
 
     __aicore__ inline void ApplyGateInKernel(uint64_t head, int32_t seqLen)
@@ -576,8 +592,7 @@ private:
     __aicore__ inline void PreprocessQKVGate(int32_t seqLen, uint64_t head)
     {
         if (useQkL2norm_) {
-            NormalizeRows(qInUb, seqLen);
-            NormalizeRows(kInUb, seqLen);
+            NormalizeQKRows(seqLen);
         }
         Muls(qInUb, qInUb, scale_, seqLen * alignK_);
         AscendC::PipeBarrier<PIPE_V>();
