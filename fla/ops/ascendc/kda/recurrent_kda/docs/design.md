@@ -22,7 +22,7 @@ GDN recurrent 的函数接口。
 
 - 不提供内部 state 矩阵任意转置或步长采样的低性能 gather/scatter 路径。
 - 不支持把 `KdaGateCumsum` 的输出流水作为公开前置步骤。
-- 不在本 PR 扩展长序列 chunk recurrent；每条 recurrent 序列长度当前限制为 `<=8`。
+- A2/A3 通过第 17 节的时间窗口支持长序列；保持逐 token recurrent 公式和 AIV-only 路径。A5 仍限制每段长度 <=8。
 
 ## 3. 能力边界
 
@@ -94,7 +94,7 @@ o_t = S @ q_t
 Tiling 按逻辑序列和 value head 拆分任务。提供 `cu_seqlens` 时，`seq_num=len(cu_seqlens)-1`，使用与
 fla-org 一致的累计边界语义，第 `i` 条序列范围为 `[cu_seqlens[i], cu_seqlens[i+1])`；未提供时，
 BSND 按 batch 行划分序列，TND 视为一条序列。接口面向 decode / MTP 短序列：每个相邻 offset
-的差值（varlen 每段长度）与 dense 单序列长度均限制为 `<=8`。提供 `cu_seqlens` 时，末项表示有效 token 数，可小于图捕获的
+的差值表示 varlen 每段长度；A2/A3 不再限制为 8，A5 每段与 dense 单序列仍须 <=8。提供 cu_seqlens 时，末项表示有效 token 数，可小于图捕获的
 token capacity。
 
 ### 6.2 Tiling Data
@@ -189,7 +189,7 @@ Q/K/V 公开输入为 BF16，gate/beta 保持 FP32/BF16/FP16 输入 dtype，并�
   覆盖 `[0,1,4,4,5]` 非等长序列、二维 slot 索引、容量化 state pool、非连续槽更新和未命中槽保持不变。
 - 空序列覆盖 `[0,1,1,4,4,8]`，确认重复 offset 对应的空序列不读取索引或 state。
 - Kimi H96/D128 smoke：`H=H_v=96,K=V=128,safe_gate=True`，运行时生成非等距 `cu_seqlens`，
-  覆盖 `cu_seqlens` 长度和值泛化；每段 recurrent 长度仍遵循当前 `<=8` 限制。
+  覆盖 cu_seqlens 长度和值泛化；该历史测试集每段长度 <=8，新增长序列覆盖见第 17 节及 ATK README。
 - Kimi 完整长上下文 stress target：`T_total=12288,H=H_v=96,K=V=128,safe_gate=True` 作为本地 stress case，
   因当前单 kernel 计算量较大，不纳入默认通过矩阵。
 - 非连续 state 覆盖 V-first/K-first、FP32/BF16、原位/非原位、slot pool guard 与未命中槽。
@@ -210,7 +210,7 @@ A2/A5 精度验证过程中修复以下问题：
   batch 维可按 `T * tokenStride` 扁平化。已验证的 feature-gap、zero-stride、batch-gap view
   自动回退连续化；token/head 置换或正 stride 重叠 descriptor 明确拒绝。
 - 当前 `K/V` 仅支持 `K=128,V=128` 或 `K=128,V=256`。
-- 当前每段 recurrent 序列长度限制为 `<=8`。
+- A2/A3 内部时间窗口容量为 8，支持多窗口序列；A5 每段仍限制为 <=8。
 - state 最后两维必须为行主序稠密矩阵；slot/head 维可有间隔但不得重叠。
 - 显式 slot 模式要求所有活跃序列的写槽互不冲突，且 slot 值位于 state pool 容量范围内。
 - 后续若扩展长序列或更多 dtype，需要同步更新 op_host 校验、tiling、kernel、本地测试 case 和 API 文档。
@@ -328,7 +328,7 @@ delta 源与目标不重叠，归约与 FP32 累加顺序保持不变。
 ### 14.5 当前 head 的有效 Beta 标量缓存
 
 CopyInBeta 的序列级 FP32 缓冲不变。每个已拥有的 head 在 V block 循环前，
-按有效 token 顺序调用原 LoadBeta，保存最多 8 个 FP32 标量，放入 scalarBuf_ 的第二个 32 B block。
+按短序列或当前窗口的有效 token 顺序调用原 LoadBeta，保存最多 8 个 FP32 标量，放入 scalarBuf_ 的第二个 32 B block。
 所有 V block 仅消费该缓存，避免同一 head/token 重复 sigmoid/ExpScalar/V_S 等待；
 没有为其他 head 计算 sigmoid。下一个 head 重新覆盖缓存，不与异步搬运共享。
 计算 dtype、sigmoid 和 allow_neg_eigval 的运算序列完全相同，没有代数变形。
@@ -433,7 +433,7 @@ CPU 标杆以 PyTorch 显式平方和、加 epsilon、开方和相除表达同�
 ### 14.10 A2/A3 批量 Q/K L2Norm 与单次 V_S
 
 本节替换公共 kernel 的逐行归一化调度，数学公式和 A5 实现不变。
-每个 head 的有效行数 L=seqLen，范围 1..8。Q/K 仍各占独立的 MAX_MTP 行平面，
+短路径 L=seqLen，长路径 L 为当前窗口有效行数，均为 1..8。Q/K 仍各占独立的 TOKEN_WINDOW 行平面，
 只处理当前 head，不跨 head 合并 FP32 数据。Q 的 scale 保持独立后置。
 
 顺序为批量 Q² → Q 逐行归约 → 批量 K² → K 逐行归约 →
@@ -471,3 +471,34 @@ UB[134912,167680) broadTmp，其中至多前 4096 B 为当前平方值。
 默认 K=128 的源码层统计：L=1/4/8 时，L2Norm V_S 分别由 2/8/16 次变为 1 次，
 Vector API 调用分别由 12/48/96 变为 12/18/26（不含 Q scale 和同步）。
 收益需以同卡 msopprof 实测确认；不能把 Wait 所含的必要 V 计算直接算作可消除耗时。
+
+## 17. A2/A3 长序列时间窗口
+
+本节扩展序列长度，数学语义、接口、TilingKey、任务归属和 A5 路径保持现状。
+短序列 L<=8 沿用原路径。长序列按 sequence -> head -> V tile -> time window -> token
+执行；time window 容量为 8，尾窗仅处理有效 token。当前 V tile 的 FP32 stateInUb
+覆盖整个逻辑序列，不从已转为 BF16 的状态快照重新载入中间状态。
+
+UB 的 packed raw 两槽、FP32 Q/K/V/gate、Beta、scalarBuf 和计算 scratch 保持原容量；
+guard 保持 2048 B，不新增 state workspace，峰值与序列长度无关。不同 V tile 会重复搬入
+并预处理输入窗口，这是避免完整 FP32 state 跨时间窗口写回 GM 的代价。
+Beta 每窗口最多读取 8*NV，当前 head 的有效标量仍使用 scalarBuf 的第二个 32 B block。
+
+每个窗口的 S0 为 MTE2 输入搬运，S1 为 Vector 转换/批量 QK L2Norm/gate 预处理，
+S2 为 Vector 逐 token state 递推与输出快照，S3 为 MTE3 写出。
+下个窗口只在上一窗口最后一个 token 的 FP32 state 已产生后进行递推。
+现有 TOKEN_WINDOW<=vStep 约束保证归一化 scratch 容量。
+
+packed raw 的预取顺序为同一 V tile 的下一窗口、下一 V tile 的首窗、下一 head 的首窗。
+raw 槽按 Alloc/EnQue/DeQue/Free 闭环使用，转换完成后释放；FP32 输入和 scratch
+复用前等待上一窗口的 Vector 消费完成。输出队列的 pending 状态跨窗口保留，仅在整个
+V tile 末尾排空，沿用最后两个同槽 state 快照的 MTE3 完成等待。
+不增加跨核协议。不同活跃 sequence 不得写入相同 state slot 的约束保持不变。
+
+全局 token、窗口起点和状态元数据循环使用 int64；窗口内下标最多为 7。
+ssm_state_indices 的二维下标基于原始 sequence 起点，num_accepted_tokens
+仅用于选择完整序列的初始 slot。A2/A3 在填充 uint32 tiling 字段前校验容量，
+不改变共享 tiling 布局或 A5 的选择与预算。
+
+开发参考采用 CHUNK_DEPENDENT V1，提炼 commit a14961e9dfe8c8264768d67fb447101873da4ecf，
+仅采用有依赖窗口的顺序和槽生命周期约束；本算子继续 AIV-only、无 Cube/CrossCore。

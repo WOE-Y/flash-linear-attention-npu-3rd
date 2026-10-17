@@ -46,6 +46,7 @@ static constexpr size_t RKDA_DIM_3 = 3;
 
 static constexpr uint32_t RKDA_LAYOUT_BSND = 0;
 static constexpr uint32_t RKDA_LAYOUT_TND = 1;
+// A2/A3 input window capacity; A5 retains its sequence-length limit.
 static constexpr size_t RKDA_MAX_MTP = 8;
 static constexpr int64_t RKDA_INPUT_BUFFER_NUM = 2;
 static constexpr int64_t RKDA_UB_GUARD_BYTES = 2048;
@@ -637,6 +638,22 @@ private:
 
     ge::graphStatus RuleFillTilingShapeData(RecurrentKdaTilingData &tiling) const
     {
+        if (ctx_.isA5 == 0) {
+            // Long-sequence offsets are 64-bit, but serialized capacities remain uint32.
+            const int64_t maxCapacity = static_cast<int64_t>(std::numeric_limits<uint32_t>::max());
+            const int64_t seqLen = ctx_.queryShape.GetDim(
+                ctx_.layout == RKDA_LAYOUT_TND ? RKDA_DIM_0 : RKDA_DIM_1);
+            const int64_t batch = ctx_.layout == RKDA_LAYOUT_TND ? 1 :
+                                  ctx_.queryShape.GetDim(RKDA_DIM_0);
+            const int64_t seqNum = SeqNum(ctx_.queryShape, ctx_.cuSeqlensShape);
+            OP_CHECK_IF(seqLen > maxCapacity || batch > maxCapacity / seqLen ||
+                            seqNum > maxCapacity || ctx_.stateShape.GetDim(RKDA_DIM_0) > maxCapacity ||
+                            (ctx_.hasSsmStateIndices &&
+                             ctx_.ssmStateShape.GetDimNum() == RKDA_METADATA_RANK2 &&
+                             ctx_.ssmStateShape.GetDim(RKDA_DIM_1) > maxCapacity),
+                        OP_LOGE(ctx_.nodeName, "Token/state capacities exceed uint32 tiling fields."),
+                        return ge::GRAPH_FAILED);
+        }
         FillTilingShapeData(ctx_.queryShape, ctx_.valueShape, ctx_.stateShape, ctx_.cuSeqlensShape, tiling);
         return ge::GRAPH_SUCCESS;
     }

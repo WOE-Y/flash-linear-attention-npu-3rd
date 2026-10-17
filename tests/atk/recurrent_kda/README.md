@@ -7,10 +7,10 @@
 - `layout` 支持 `BSND/TND`；`BSND` 下 `q/k=[B,T,H,K]`，`v/out=[B,T,HV,V]`，`g=[B,T,HV,K]`，`beta=[B,T,HV]`。
 - `TND` 下 `q/k=[T,H,K]`，`v/out=[T,HV,V]`，`g=[T,HV,K]`，`beta=[T,HV]`。
 - `initial_state` 是 state pool；`state_v_first=true` 时为 `[state_capacity,HV,V,K]`，否则为 `[state_capacity,HV,K,V]`。
-- `cu_seqlens` 为必传同设备 `INT32/INT64` tensor，shape 为 `[seq_num+1]`，首项为 `0`，末项不超过 token capacity，offset 单调不减。
+- `cu_seqlens` 可选；传入时为同设备 `INT32/INT64` tensor，shape 为 `[seq_num+1]`，首项为 `0`，末项不超过 token capacity，offset 单调不减。
 - `q/k/v/out` 仅支持 `BFLOAT16`；`g/beta` 支持 `FLOAT/BFLOAT16/FLOAT16`，`A_log/dt_bias` 支持 `FLOAT`。
 - `HV % H == 0`，`H/HV <= 256`；当前支持 `K=128,V=128` 或 `K=128,V=256`。
-- 每段序列长度不超过 `8`；显式 `ssm_state_indices` 可使 `state_capacity > seq_num`。
+- A2/A3 支持多时间窗口长序列；A5 每段仍不超过 8；显式 `ssm_state_indices` 可使 `state_capacity > seq_num`。
 - 当前 ATK 用例遵循上述约束，并通过 `case_spec` 固定具体取值；扩展用例时应继续满足这些限制。
 
 ## 标杆来源
@@ -359,3 +359,58 @@ msopprof 最终比较基线为 24b44ae1。两版本各执行两轮，每模型�
 运行时文件访问核验确认实际打开的 RecurrentKda 对象 SHA256 与候选包一致，
 并再次确认当前安装的 72 个对象、API 和 tiling 库与本轮构建匹配。
 候选普通包已保留安装；本轮未创建新 commit。
+
+## A2/A3 长序列支持（2026-10-17）
+
+本轮基线为 e2890ad6。A2/A3 的 8 仅表示内部输入窗口容量，不再限制 dense
+单序列或 varlen 分段长度。保留 T<=8 快路径，长路径按 head、V tile、时间窗口、token
+顺序递推，当前 V tile 的 FP32 state 跨窗口驻 UB，不从 BF16 快照重新读取。
+UB、guard 和系统 workspace 的分配保持现状。A5 kernel、分派入口、tiling struct
+保持原样，新增 host 容量检查仅对 A2/A3 生效。现有 uint32 tiling 容量和合法地址范围仍须满足。
+
+新增执行器 executor_recurrent_kda_longseq.py 和固定用例包 atk_recurrent_kda_longseq.json，
+共 41 个结构配置、每配置 3 个固定种子，共 123 个精度 case。标杆沿用当前 CPU
+recurrent 公式，扩展 FP64 工作 dtype 用于真正的高精度 benchmark；原 FP32 分支在
+9 个代表性场景上与 e2890ad6 的 out/state 逐元素完全一致。原有输入与精度阈值未放宽。
+
+| 分支 | 长序列 case id |
+| --- | --- |
+| T=9/15/16/17/31/32/33/64/128/256/512/1024，BSND/TND，state 两种布局及 dtype，V=128/256，门控与归一化组合 | 0–71 |
+| dense 多 batch、cu_seqlens 可选、单 head | 72–83 |
+| 同一 core 连续多个 head | 84–86 |
+| 非连续 Q/K/V/state | 87–92 |
+| 混合长短/空分段、有效 token 前缀与 padding tail | 93–98 |
+| packed/二维 state 索引、accepted token 跨窗口、重复 slot、原位与非原位 | 99–113 |
+| state 输出与原位开关 | 114–119 |
+| 缺省初始 state | 120–122 |
+
+长序列 ATK 精度采用既有补充测试的原生 cv_fused_double_benchmark：
+max_re_ratio=5、avg_re_ratio=1.5、root_mean_squared_ratio=1.5、
+number_count_radio=4。ATK 丢弃 non_param case_spec 时，由 case_id 恢复固定配置，
+并校验其余实际传入的结构参数与种子，避免默认参数掩盖覆盖缺失。
+非原位 state 输出只比较实际写入槽；原位模式比较完整 pool 并保留未写入槽的检查，
+非原位调用同时检查 initial_state 未修改。padding tail 不参与精度比较。
+
+TilingKey 仍为 0；短/长运行时分支分别由原 base 与新增 case 覆盖。
+atk_recurrent_kda_longseq_mss.json 人工选取 0、84、93、102、108 五个最小代表，
+覆盖窗口 tail、同 core 多 head、混合空分段、归一化、重复槽与 accepted token。
+
+可在已加载测试环境后执行：
+
+~~~sh
+python tests/atk/recurrent_kda/executor_recurrent_kda_longseq.py --generate tests/atk/recurrent_kda/atk_recurrent_kda_longseq.json
+atk node --backend npu --devices <id> node --backend cpu task -c tests/atk/recurrent_kda/atk_recurrent_kda_longseq.json --task accuracy -p tests/atk/recurrent_kda/executor_recurrent_kda_longseq.py -sp -to 2000
+~~~
+
+本轮 A2 精度结果：8/8 base、200/200 补充、72/72 既有边界、
+123/123 新增长序列全部通过。新增长序列使用原生 CPU FP32 控制组与 CPU FP64
+benchmark；补充 200-case 沿用 ACLNN/ctypes 路径。
+A2、A3、A5 单算子构建通过；当前只有 A2 设备执行结果，没有 A3/A5 硬件回归结论。
+
+本轮性能和 sanitizer 已完成采集。相对 e2890ad6，T=4/B=1 耗时降低3.47%，
+其余七个 base 的耗时增加0.68%至6.12%，不能宣称短序列性能收益。
+执行追踪确认同核多 head 的双 raw slot 轮转、跨窗口驻留和非零分段起点。
+racecheck、memcheck 的代表用例未报告目标算子错误；initcheck 仍有 PRIVATE 报告，
+其中同一短用例在候选和基线均为16条；synccheck 有冗余 set/wait 警告。
+因此本轮尚未形成 sanitizer 全部通过的正式验收结论，开发期验证记录继续保留。
+A5 仅完成源码一致性和编译核验，未做硬件回归。普通包已恢复，本轮未提交。
