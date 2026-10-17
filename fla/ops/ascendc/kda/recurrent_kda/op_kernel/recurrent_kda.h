@@ -25,6 +25,7 @@ using namespace matmul;
 using namespace AscendC;
 constexpr uint64_t BUFFER_NUM = 1;
 constexpr uint64_t INPUT_BUFFER_NUM = 2;
+constexpr uint32_t PACKED_INPUT_BUFFER_NUM = 2;
 constexpr uint32_t MAX_OUT_BUFFER_NUM = 2;
 constexpr uint64_t MAX_MTP = 8;
 constexpr uint64_t BF16_NUM_PER_BLOCK = 16;
@@ -161,10 +162,12 @@ public:
         uint32_t kSize = MAX_MTP * alignK_ * sizeof(float);
         uint32_t betaUbSize =
             Ceil(MAX_MTP * NV_, FP32_NUM_PER_BLOCK) * FP32_NUM_PER_BLOCK * sizeof(float);
-        pipe_->InitBuffer(qInQueue_, BUFFER_NUM, MAX_MTP * alignK_ * sizeof(inType));
-        pipe_->InitBuffer(kInQueue_, BUFFER_NUM, MAX_MTP * alignK_ * sizeof(inType));
-        pipe_->InitBuffer(vInQueue_, BUFFER_NUM, MAX_MTP * alignV_ * sizeof(inType));
-        pipe_->InitBuffer(gateInQueue_, BUFFER_NUM, MAX_MTP * alignK_ * sizeof(float));
+        packedKOffset_ = MAX_MTP * alignK_;
+        packedVOffset_ = 2 * packedKOffset_;
+        packedGateOffset_ = packedVOffset_ + MAX_MTP * alignV_;
+        uint32_t packedBytes =
+            packedGateOffset_ * sizeof(inType) + MAX_MTP * alignK_ * sizeof(float);
+        pipe_->InitBuffer(packedInQueue_, PACKED_INPUT_BUFFER_NUM, packedBytes);
         pipe_->InitBuffer(betaInQueue_, BUFFER_NUM, betaUbSize);
         pipe_->InitBuffer(stateInQueue_, INPUT_BUFFER_NUM, alignK_ * vStep_ * sizeof(stateType));
         pipe_->InitBuffer(stateOutQueue_, stateOutBufferNum_, alignK_ * vStep_ * sizeof(stateType));
@@ -193,12 +196,13 @@ public:
         betaInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(betaUbSize / sizeof(float)), buffOffset);
         buffOffset += betaUbSize;
         gateInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
+
     }
 
     __aicore__ inline void SyncMte2ToV()
     {
         if (!eventMte2ToVInitialized_) {
-            eventIdMte2ToV_ = GetTPipePtr()->FetchEventID(HardEvent::MTE2_V);
+            eventIdMte2ToV_ = GetTPipePtr()->AllocEventID<HardEvent::MTE2_V>();
             eventMte2ToVInitialized_ = true;
         }
         SetFlag<HardEvent::MTE2_V>(eventIdMte2ToV_);
@@ -208,7 +212,7 @@ public:
     __aicore__ inline void SyncVToMte2()
     {
         if (!eventVToMte2Initialized_) {
-            eventIdVToMte2_ = GetTPipePtr()->FetchEventID(HardEvent::V_MTE2);
+            eventIdVToMte2_ = GetTPipePtr()->AllocEventID<HardEvent::V_MTE2>();
             eventVToMte2Initialized_ = true;
         }
         SetFlag<HardEvent::V_MTE2>(eventIdVToMte2_);
@@ -218,7 +222,7 @@ public:
     __aicore__ inline void SyncVToS()
     {
         if (!eventVToSInitialized_) {
-            eventIdVToS_ = GetTPipePtr()->FetchEventID(HardEvent::V_S);
+            eventIdVToS_ = GetTPipePtr()->AllocEventID<HardEvent::V_S>();
             eventVToSInitialized_ = true;
         }
         SetFlag<HardEvent::V_S>(eventIdVToS_);
@@ -228,7 +232,7 @@ public:
     __aicore__ inline void SyncVToMte3()
     {
         if (!eventVToMte3Initialized_) {
-            eventIdVToMte3_ = GetTPipePtr()->FetchEventID(HardEvent::V_MTE3);
+            eventIdVToMte3_ = GetTPipePtr()->AllocEventID<HardEvent::V_MTE3>();
             eventVToMte3Initialized_ = true;
         }
         SetFlag<HardEvent::V_MTE3>(eventIdVToMte3_);
@@ -238,7 +242,7 @@ public:
     __aicore__ inline void SyncMte3ToV()
     {
         if (!eventMte3ToVInitialized_) {
-            eventIdMte3ToV_ = GetTPipePtr()->FetchEventID(HardEvent::MTE3_V);
+            eventIdMte3ToV_ = GetTPipePtr()->AllocEventID<HardEvent::MTE3_V>();
             eventMte3ToVInitialized_ = true;
         }
         SetFlag<HardEvent::MTE3_V>(eventIdMte3ToV_);
@@ -298,9 +302,10 @@ public:
                 return;
             }
             CopyInBeta(seq0, seq1);
+            PrefetchPackedInputs(seq0, seqLen, head_i);
             bool statePrefetched = false;
             while (head_i < NV_) {
-                uint64_t nextHead = FindNextTaskHead(batch_i, head_i + 1);
+                uint64_t nextHead = head_i + GetBlockNum();
                 statePrefetched = ProcessHead(batch_i, seq0, seq1, head_i, stateSlot,
                                               statePrefetched, nextHead < NV_, stateSlot, nextHead);
                 head_i = nextHead;
@@ -423,14 +428,14 @@ private:
         }
     }
 
-    __aicore__ inline float ReadFloat(GlobalTensor<float> &tensor, uint64_t offset)
+    __aicore__ inline float ReadExpFloat(GlobalTensor<float> &tensor, uint64_t offset)
     {
         LocalTensor<float> scalar = scalarBuf_.Get<float>();
         DataCopyParams params{1, static_cast<uint16_t>(sizeof(float)), 0, 0};
         DataCopyPadParams padParams{false, 0, 0, 0};
         DataCopyPad(scalar, tensor[offset], params, padParams);
         SyncMte2ToV();
-        Adds(scalar, scalar, 0.0f, 1);
+        Exp(scalar, scalar, 1);
         PipeBarrier<PIPE_V>();
         SyncVToS();
         __ubuf__ float *ptr = (__ubuf__ float *)scalar.GetPhyAddr();
@@ -477,7 +482,7 @@ private:
     __aicore__ inline void ApplyGateInKernel(uint64_t head, int32_t seqLen)
     {
         uint32_t total = static_cast<uint32_t>(seqLen) * alignK_;
-        float expA = hasALog_ ? ExpScalar(ReadFloat(aLogGm_, head)) : 1.0f;
+        float expA = hasALog_ ? ReadExpFloat(aLogGm_, head) : 1.0f;
 
         if (hasDtBias_) {
             CopyVectorIn(broadTmpInUb, dtBiasGm_, head * realK_, realK_);
@@ -516,72 +521,57 @@ private:
     }
 
     template <typename gateType>
-    __aicore__ inline void CopyInGate(uint64_t gateOffset, int32_t seqLen)
+    __aicore__ inline void CopyPackedGate(LocalTensor<inType> &packed, uint64_t gateOffset, int32_t seqLen)
     {
-        LocalTensor<gateType> gateLocal = gateInQueue_.AllocTensor<gateType>();
-        Duplicate<gateType>(gateLocal, static_cast<gateType>(0), alignK_ * static_cast<uint32_t>(seqLen));
-        SyncVToMte2();
-        DataCopyExtParams gateInParams{static_cast<uint16_t>(seqLen),
-                                       static_cast<uint32_t>(realK_ * sizeof(gateType)),
-                                       static_cast<uint32_t>((NV_ - 1) * realK_ * sizeof(gateType)), 0, 0};
-        DataCopyPadExtParams<gateType> gatePadParams{
-            true, 0, static_cast<uint8_t>(alignK_ - realK_), static_cast<gateType>(0)};
+        LocalTensor<gateType> gateLocal = packed[packedGateOffset_].template ReinterpretCast<gateType>();
+        DataCopyExtParams params{
+            static_cast<uint16_t>(seqLen), static_cast<uint32_t>(realK_ * sizeof(gateType)),
+            static_cast<uint32_t>((NV_ - 1) * realK_ * sizeof(gateType)), 0, 0};
+        DataCopyPadExtParams<gateType> pad{true, 0, static_cast<uint8_t>(alignK_ - realK_), 0};
         if constexpr (std::is_same<gateType, float32_t>()) {
-            DataCopyPad(gateLocal, gateFloatGm_[gateOffset], gateInParams, gatePadParams);
+            DataCopyPad(gateLocal, gateFloatGm_[gateOffset], params, pad);
         } else if constexpr (std::is_same<gateType, bfloat16_t>()) {
-            DataCopyPad(gateLocal, gateBf16Gm_[gateOffset], gateInParams, gatePadParams);
+            DataCopyPad(gateLocal, gateBf16Gm_[gateOffset], params, pad);
         } else {
-            DataCopyPad(gateLocal, gateFp16Gm_[gateOffset], gateInParams, gatePadParams);
+            DataCopyPad(gateLocal, gateFp16Gm_[gateOffset], params, pad);
         }
-        gateInQueue_.EnQue<gateType>(gateLocal);
-        gateLocal = gateInQueue_.DeQue<gateType>();
-        if constexpr (std::is_same<gateType, float32_t>()) {
-            Adds(gateInUb, gateLocal, 0.0f, alignK_ * static_cast<uint32_t>(seqLen));
-        } else {
-            Cast(gateInUb, gateLocal, AscendC::RoundMode::CAST_NONE,
-                 alignK_ * static_cast<uint32_t>(seqLen));
-        }
-        gateInQueue_.FreeTensor(gateLocal);
-        PipeBarrier<PIPE_V>();
     }
 
-    __aicore__ inline void CopyInQKVGate(uint64_t qOffset, uint64_t kOffset, uint64_t vOffset,
-                                         uint64_t gateOffset, int32_t seqLen, uint64_t head)
+    __aicore__ inline void PrefetchPackedInputs(int64_t seq0, int32_t seqLen, uint64_t head)
     {
-        LocalTensor<inType> qLocal = qInQueue_.AllocTensor<inType>();
-        LocalTensor<inType> kLocal = kInQueue_.AllocTensor<inType>();
-        LocalTensor<inType> vLocal = vInQueue_.AllocTensor<inType>();
-
-        DataCopyExtParams qInParams{static_cast<uint16_t>(seqLen), static_cast<uint32_t>(realK_ * sizeof(inType)),
-                                    static_cast<uint32_t>((queryTokenStride_ - realK_) * sizeof(inType)), 0, 0};
-        DataCopyExtParams kInParams{static_cast<uint16_t>(seqLen), static_cast<uint32_t>(realK_ * sizeof(inType)),
-                                    static_cast<uint32_t>((keyTokenStride_ - realK_) * sizeof(inType)), 0, 0};
-        DataCopyExtParams vInParams{static_cast<uint16_t>(seqLen), static_cast<uint32_t>(realV_ * sizeof(inType)),
-                                    static_cast<uint32_t>((valueTokenStride_ - realV_) * sizeof(inType)), 0, 0};
-        DataCopyPadExtParams<inType> qkPadParams{true, 0, static_cast<uint8_t>(alignK_ - realK_), 0};
-        DataCopyPadExtParams<inType> vPadParams{true, 0, static_cast<uint8_t>(alignV_ - realV_), 0};
-
-        DataCopyPad(qLocal, queryGm_[qOffset], qInParams, qkPadParams);
-        DataCopyPad(kLocal, keyGm_[kOffset], kInParams, qkPadParams);
-        DataCopyPad(vLocal, valueGm_[vOffset], vInParams, vPadParams);
-        qInQueue_.EnQue<inType>(qLocal);
-        kInQueue_.EnQue<inType>(kLocal);
-        vInQueue_.EnQue<inType>(vLocal);
+        LocalTensor<inType> packed = packedInQueue_.AllocTensor<inType>();
+        LocalTensor<inType> qLocal = packed;
+        LocalTensor<inType> kLocal = packed[packedKOffset_];
+        LocalTensor<inType> vLocal = packed[packedVOffset_];
+        const uint64_t token = static_cast<uint64_t>(seq0);
+        const uint64_t qkHead = head / (NV_ / NK_);
+        DataCopyExtParams qParams{
+            static_cast<uint16_t>(seqLen), static_cast<uint32_t>(realK_ * sizeof(inType)),
+            static_cast<uint32_t>((queryTokenStride_ - realK_) * sizeof(inType)), 0, 0};
+        DataCopyExtParams kParams{
+            static_cast<uint16_t>(seqLen), static_cast<uint32_t>(realK_ * sizeof(inType)),
+            static_cast<uint32_t>((keyTokenStride_ - realK_) * sizeof(inType)), 0, 0};
+        DataCopyExtParams vParams{
+            static_cast<uint16_t>(seqLen), static_cast<uint32_t>(realV_ * sizeof(inType)),
+            static_cast<uint32_t>((valueTokenStride_ - realV_) * sizeof(inType)), 0, 0};
+        DataCopyPadExtParams<inType> qkPad{true, 0, static_cast<uint8_t>(alignK_ - realK_), 0};
+        DataCopyPadExtParams<inType> vPad{true, 0, static_cast<uint8_t>(alignV_ - realV_), 0};
+        DataCopyPad(qLocal, queryGm_[token * queryTokenStride_ + qkHead * queryHeadStride_], qParams, qkPad);
+        DataCopyPad(kLocal, keyGm_[token * keyTokenStride_ + qkHead * keyHeadStride_], kParams, qkPad);
+        DataCopyPad(vLocal, valueGm_[token * valueTokenStride_ + head * valueHeadStride_], vParams, vPad);
+        uint64_t gateOffset = (token * NV_ + head) * realK_;
         if (gateDtype_ == 0) {
-            CopyInGate<float>(gateOffset, seqLen);
+            CopyPackedGate<float>(packed, gateOffset, seqLen);
         } else if (gateDtype_ == 1) {
-            CopyInGate<bfloat16_t>(gateOffset, seqLen);
+            CopyPackedGate<bfloat16_t>(packed, gateOffset, seqLen);
         } else {
-            CopyInGate<half>(gateOffset, seqLen);
+            CopyPackedGate<half>(packed, gateOffset, seqLen);
         }
+        packedInQueue_.EnQue<inType>(packed);
+    }
 
-        qLocal = qInQueue_.DeQue<inType>();
-        kLocal = kInQueue_.DeQue<inType>();
-        vLocal = vInQueue_.DeQue<inType>();
-        Cast(qInUb, qLocal, AscendC::RoundMode::CAST_NONE, alignK_ * seqLen);
-        Cast(kInUb, kLocal, AscendC::RoundMode::CAST_NONE, alignK_ * seqLen);
-        Cast(vInUb, vLocal, AscendC::RoundMode::CAST_NONE, alignV_ * seqLen);
-        AscendC::PipeBarrier<PIPE_V>();
+    __aicore__ inline void PreprocessQKVGate(int32_t seqLen, uint64_t head)
+    {
         if (useQkL2norm_) {
             NormalizeRows(qInUb, seqLen);
             NormalizeRows(kInUb, seqLen);
@@ -594,9 +584,37 @@ private:
         Exp(gateInUb, gateInUb, alignK_ * seqLen);
         AscendC::PipeBarrier<PIPE_V>();
 
-        qInQueue_.FreeTensor(qLocal);
-        kInQueue_.FreeTensor(kLocal);
-        vInQueue_.FreeTensor(vLocal);
+    }
+
+    __aicore__ inline void CopyInQKVGate(int64_t seq0, int32_t seqLen, uint64_t head,
+                                         bool hasNextHead, uint64_t nextHead)
+    {
+        LocalTensor<inType> packed = packedInQueue_.DeQue<inType>();
+        LocalTensor<inType> qLocal = packed;
+        LocalTensor<inType> kLocal = packed[packedKOffset_];
+        LocalTensor<inType> vLocal = packed[packedVOffset_];
+        if (gateDtype_ == 0) {
+            LocalTensor<float> gateLocal = packed[packedGateOffset_].template ReinterpretCast<float>();
+            Adds(gateInUb, gateLocal, 0.0f, alignK_ * seqLen);
+        } else if (gateDtype_ == 1) {
+            LocalTensor<bfloat16_t> gateLocal =
+                packed[packedGateOffset_].template ReinterpretCast<bfloat16_t>();
+            Cast(gateInUb, gateLocal, AscendC::RoundMode::CAST_NONE, alignK_ * seqLen);
+        } else {
+            LocalTensor<half> gateLocal = packed[packedGateOffset_].template ReinterpretCast<half>();
+            Cast(gateInUb, gateLocal, AscendC::RoundMode::CAST_NONE, alignK_ * seqLen);
+        }
+        Cast(qInUb, qLocal, AscendC::RoundMode::CAST_NONE, alignK_ * seqLen);
+        Cast(kInUb, kLocal, AscendC::RoundMode::CAST_NONE, alignK_ * seqLen);
+        Cast(vInUb, vLocal, AscendC::RoundMode::CAST_NONE, alignV_ * seqLen);
+        PipeBarrier<PIPE_V>();
+
+        // Keep the current raw slot owned until the producer acquires the other slot.
+        if (hasNextHead) {
+            PrefetchPackedInputs(seq0, seqLen, nextHead);
+        }
+        packedInQueue_.FreeTensor(packed);
+        PreprocessQKVGate(seqLen, head);
     }
 
     template <typename transType>
@@ -798,8 +816,6 @@ private:
 
     __aicore__ inline void Compute(uint32_t curSingleV, uint64_t curQKOffset, uint64_t curVOffset)
     {
-        uint32_t stateShape[2] = {curSingleV, alignK_};
-        uint32_t deltaShape[2] = {curSingleV, 1};
         MatVecMul(stateInUb, gateInUb[curQKOffset], stateInUb, curSingleV, false);
         AscendC::PipeBarrier<PIPE_V>();
         MatVecMul(stateInUb, kInUb[curQKOffset], broadTmpInUb, curSingleV, false);
@@ -810,9 +826,15 @@ private:
         AscendC::PipeBarrier<PIPE_V>();
         Muls(deltaInUb, deltaInUb, beta_, curSingleV);
         AscendC::PipeBarrier<PIPE_V>();
-        Broadcast<float, 2, 1>(broadTmpInUb, deltaInUb, stateShape, deltaShape);
+        // Supported V sizes and vStep are multiples of eight rows.
+        // Keep one 32-byte block per residual instead of copying it across K.
+        Brcb(broadTmpInUb, deltaInUb, curSingleV / FP32_NUM_PER_BLOCK, {1, FP32_NUM_PER_BLOCK});
         AscendC::PipeBarrier<PIPE_V>();
-        MatVecMul(broadTmpInUb, kInUb[curQKOffset], stateInUb, curSingleV, true);
+        const uint8_t rowStride = static_cast<uint8_t>(alignK_ / FP32_NUM_PER_BLOCK);
+        for (uint32_t k = 0; k < alignK_; k += REPEAT_LENTH) {
+            MulAddDst(stateInUb[k], broadTmpInUb, kInUb[curQKOffset + k],
+                      REPEAT_LENTH, curSingleV, {1, 0, 1, rowStride, 1, 0});
+        }
         AscendC::PipeBarrier<PIPE_V>();
         MatVecMul(stateInUb, qInUb[curQKOffset], broadTmpInUb, curSingleV, false);
         AscendC::PipeBarrier<PIPE_V>();
@@ -936,15 +958,14 @@ private:
                                       uint64_t head_i, uint64_t stateSlot, bool statePrefetched,
                                       bool hasNextHead, uint64_t nextStateSlot, uint64_t nextHead)
     {
-        uint64_t qkHead = head_i / (NV_ / NK_);
-        uint64_t qOffset = static_cast<uint64_t>(seq0) * queryTokenStride_ + qkHead * queryHeadStride_;
-        uint64_t kOffset = static_cast<uint64_t>(seq0) * keyTokenStride_ + qkHead * keyHeadStride_;
-        uint64_t vOffset = static_cast<uint64_t>(seq0) * valueTokenStride_ + head_i * valueHeadStride_;
-        uint64_t gateOffset = (static_cast<uint64_t>(seq0) * NV_ + head_i) * realK_;
-        CopyInQKVGate(
-            qOffset, kOffset, vOffset, gateOffset, static_cast<int32_t>(seq1 - seq0), head_i);
+        CopyInQKVGate(seq0, static_cast<int32_t>(seq1 - seq0), head_i, hasNextHead, nextHead);
         if (realV_ == 0) {
             return false;
+        }
+        // A head's effective beta is identical for every V block.
+        LocalTensor<float> betaValues = scalarBuf_.GetWithOffset<float>(MAX_MTP, DATA_BLOCK_BYTES);
+        for (int64_t token = 0; token < seq1 - seq0; ++token) {
+            betaValues.SetValue(token, LoadBeta(head_i + static_cast<uint64_t>(token) * NV_));
         }
         uint64_t nextVOffset = statePrefetched ? vStep_ : 0;
         uint32_t queuedBufferNum = statePrefetched ? 1 : 0;
@@ -974,13 +995,12 @@ private:
             bool hasPendingAttn = false;
             bool hasPendingState = false;
             for (int64_t seq_i = seq0; seq_i < seq1; seq_i++) {
-                uint64_t gbOffset = head_i + static_cast<uint64_t>(seq_i - seq0) * NV_;
                 uint64_t curQKOffset = static_cast<uint64_t>(seq_i - seq0) * alignK_;
                 uint64_t curVOffset = static_cast<uint64_t>(seq_i - seq0) * alignV_ + v_i;
                 uint64_t attnOffset = (static_cast<uint64_t>(seq_i) * NV_ + head_i) * realV_ + v_i;
                 uint64_t curStateSlot = StateSlotForToken(batchIdx, seq0, seq_i);
                 uint64_t curStateOutSlot = curStateSlot;
-                beta_ = LoadBeta(gbOffset);
+                beta_ = betaValues.GetValue(seq_i - seq0);
                 Compute(curSingleV, curQKOffset, curVOffset);
                 if (attnOutBufferNum_ == BUFFER_NUM) {
                     CopyOutAttn(attnOffset, curSingleV);
@@ -1007,6 +1027,15 @@ private:
                 CopyOutAttn(pendingAttnOffset, curSingleV);
             }
             if (hasPendingState) {
+                // The final two snapshots can target the same GM slot without another
+                // queue allocation to wait for the preceding MTE3 write.
+                if (seq1 - seq0 > 1 &&
+                    pendingStateSlot == StateSlotForToken(batchIdx, seq0, seq1 - 2)) {
+                    int32_t eventId = GetTPipePtr()->AllocEventID<HardEvent::MTE3_S>();
+                    SetFlag<HardEvent::MTE3_S>(eventId);
+                    WaitFlag<HardEvent::MTE3_S>(eventId);
+                    GetTPipePtr()->ReleaseEventID<HardEvent::MTE3_S>(eventId);
+                }
                 CopyOutState(pendingStateSlot, head_i, v_i, curSingleV);
             }
         }
@@ -1015,17 +1044,10 @@ private:
 
     __aicore__ inline uint64_t FindNextTaskHead(uint64_t batchIdx, uint64_t startHead) const
     {
-        for (uint64_t head = startHead; head < NV_; ++head) {
-            if (IsCurrentTask(batchIdx, head)) {
-                return head;
-            }
-        }
-        return NV_;
-    }
-
-    __aicore__ inline bool IsCurrentTask(uint64_t batchIdx, uint64_t headIdx) const
-    {
-        return ((batchIdx * NV_ + headIdx) % GetBlockNum()) == blockIdx;
+        const uint64_t blockNum = GetBlockNum();
+        const uint64_t taskRemainder = (batchIdx * NV_ + startHead) % blockNum;
+        const uint64_t head = startHead + (blockIdx + blockNum - taskRemainder) % blockNum;
+        return head < NV_ ? head : NV_;
     }
 
 private:
@@ -1050,10 +1072,7 @@ private:
     GlobalTensor<stateType> finalStateGm_;
     GlobalTensor<outType> attnOutGm_;
     TPipe *pipe_;
-    TQue<QuePosition::VECIN, 1> qInQueue_;
-    TQue<QuePosition::VECIN, 1> kInQueue_;
-    TQue<QuePosition::VECIN, 1> vInQueue_;
-    TQue<QuePosition::VECIN, 1> gateInQueue_;
+    TQue<QuePosition::VECIN, PACKED_INPUT_BUFFER_NUM> packedInQueue_;
     TQue<QuePosition::VECIN, 1> betaInQueue_;
     TQue<QuePosition::VECIN, INPUT_BUFFER_NUM> stateInQueue_;
     TQue<QuePosition::VECOUT, MAX_OUT_BUFFER_NUM> attnOutQueue_;
@@ -1061,6 +1080,9 @@ private:
     TBuf<TPosition::VECCALC> tmpBuff;
     TBuf<TPosition::VECCALC> stateTransposeBuf_;
     TBuf<TPosition::VECCALC> scalarBuf_;
+    uint32_t packedKOffset_;
+    uint32_t packedVOffset_;
+    uint32_t packedGateOffset_;
     LocalTensor<float> qInUb;
     LocalTensor<float> kInUb;
     LocalTensor<float> vInUb;
