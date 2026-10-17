@@ -44,7 +44,10 @@ GDN recurrent 的函数接口。
 
 ## 4. 数学与接口语义
 
-若 `use_qk_l2norm_in_kernel=True`，先对每个 token 的 `q/k` 在最后一维做 L2 normalize。随后 `q` 乘以 `scale`。
+若 use_qk_l2norm_in_kernel=True，A2/A3 对每个 token/head 的 q/k 在最后一维
+按 FP32 计算 x / sqrt(sum(x*x) + 1e-6)，随后仅 q 乘以 scale。
+对应竞品 fused_recurrent.py 的 Q/K 归一化公式。A5 保持现有无 epsilon 的实现，
+本轮不修改 A5 kernel 或 host 分派。关闭该属性时不执行归一化。
 
 `use_gate_in_kernel=false` 时，`g` 已经是 step log gate。`use_gate_in_kernel=true` 时，kernel 内转换 raw gate：
 
@@ -412,3 +415,16 @@ core 0 的 head 80 raw DMA 与 V 运算交叠，head 40 未观察到交叠，不
 原四 base 精度 4/4、补充 200/200、额外 MTP 2/2；硬件 msopprof 四 case 均提升。
 racecheck/memcheck 在记录的代表范围无错误；initcheck PRIVATE 报告和冗余同步
 警告仍保留，完整范围与数据见 tests/atk/recurrent_kda/README.md 的本轮记录。
+
+
+### 14.9 A2/A3 L2Norm epsilon 修复
+
+NormalizeRows 的顺序为 Mul → ReduceSum → Adds(1e-6f) → Sqrt →
+V_S → Scalar 倒数 → Muls；各有依赖的 V 指令间保留 PIPE_V barrier。
+CPU 标杆以 PyTorch 显式平方和、加 epsilon、开方和相除表达同一公式，
+取代 F.normalize 的 norm clamp。Q 的 scale 时机保持在归一化之后。
+零向量仍得到零；有限、平方和不溢出的输入，其分母至少 1e-3，
+倒数至多 1e3，避免直接除以零。该改动不改变 UB 分区、vStep、队列或事件数，
+没有新增跨核依赖；现有 FP32 deltaInUb 标量槽存放加 epsilon 后的平方和。
+每个有效 Q/K 行各增加一次标量元素 Adds 和相应 V barrier，性能代价由八模型实测。
+数值正确性以竞品公式为依据，不为保持旧时延删除 epsilon。

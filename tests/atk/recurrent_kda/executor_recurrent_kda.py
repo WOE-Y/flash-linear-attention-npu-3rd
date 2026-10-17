@@ -125,8 +125,8 @@ def recurrent_kda_reference(
     scale = (dk ** -0.5) if scale is None else scale
 
     if use_qk_l2norm_in_kernel:
-        q_flat = F.normalize(q_flat, p=2, dim=-1)
-        k_flat = F.normalize(k_flat, p=2, dim=-1)
+        q_flat = q_flat / torch.sqrt((q_flat * q_flat).sum(dim=-1, keepdim=True) + 1e-6)
+        k_flat = k_flat / torch.sqrt((k_flat * k_flat).sum(dim=-1, keepdim=True) + 1e-6)
     q_flat = q_flat * scale
 
     if use_gate_in_kernel:

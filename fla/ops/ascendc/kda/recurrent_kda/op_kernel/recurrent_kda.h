@@ -36,6 +36,7 @@ constexpr uint32_t ADD_FOLD_REDUCE_MIN_K = 128;
 constexpr uint64_t INVALID_STATE_SLOT = static_cast<uint64_t>(-1);
 constexpr uint32_t STATE_TRANSPOSE_BLOCK = 16;
 constexpr uint32_t DATA_BLOCK_BYTES = 32;
+constexpr float QK_L2NORM_EPS = 1e-6f;
 
 #ifndef RKDA_ENABLE_ADD_FOLD_REDUCE
 #define RKDA_ENABLE_ADD_FOLD_REDUCE  1
@@ -467,6 +468,8 @@ private:
             Mul(broadTmpInUb, tensor[rowOffset], tensor[rowOffset], alignK_);
             PipeBarrier<PIPE_V>();
             ReduceSumDispatch(deltaInUb, broadTmpInUb, 1);
+            PipeBarrier<PIPE_V>();
+            Adds(deltaInUb, deltaInUb, QK_L2NORM_EPS, 1);
             PipeBarrier<PIPE_V>();
             Sqrt(deltaInUb, deltaInUb, 1);
             PipeBarrier<PIPE_V>();
