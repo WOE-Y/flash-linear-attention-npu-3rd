@@ -475,7 +475,7 @@ Vector API 调用分别由 12/48/96 变为 12/18/26（不含 Q scale 和同步�
 ## 17. A2/A3 长序列时间窗口
 
 本节扩展序列长度，数学语义、接口、TilingKey、任务归属和 A5 路径保持现状。
-短序列 L<=8 沿用原路径。长序列按 sequence -> head -> V tile -> time window -> token
+短序列 L<=8 保持每 head 一次输入预处理，递推主体按17.1共用。长序列按 sequence -> head -> V tile -> time window -> token
 执行；time window 容量为 8，尾窗仅处理有效 token。当前 V tile 的 FP32 stateInUb
 覆盖整个逻辑序列，不从已转为 BF16 的状态快照重新载入中间状态。
 
@@ -502,3 +502,26 @@ ssm_state_indices 的二维下标基于原始 sequence 起点，num_accepted_tok
 
 开发参考采用 CHUNK_DEPENDENT V1，提炼 commit a14961e9dfe8c8264768d67fb447101873da4ecf，
 仅采用有依赖窗口的顺序和槽生命周期约束；本算子继续 AIV-only、无 Cube/CrossCore。
+
+### 17.1 A2/A3 共享递推主体与短路径控制
+
+ProcessHead<ShortTokens>统一维护V tile状态预取、token递推、输出入队和最终排空的源代码。
+Process按实际逻辑分段长度选择实例，再由ProcessHeadTasks遍历本核所属head：
+- ShortTokens=1：实际段长为1，输入预处理行数固定为1，token地址和循环控制可在编译期精简。
+- ShortTokens=-1：其它2..8短段，保留原动态token循环和每head一次输入预处理。
+- ShortTokens=0：长段，按最多8行的时间窗口更新输入，当前V tile的FP32 state跨窗口驻UB。
+
+短实例通过if constexpr提前结束时间范围循环，不执行外层窗口回绕、Beta重载和下一窗口
+描述符计算；每head的有效Beta只缓存一次，供全部V tile复用。长实例按windowEnd推进。
+短路径先完成Q/K/V/gate预处理，再创建Beta LocalTensor视图，避免视图跨预处理存活；
+通用短实例直接使用原seq1作为token循环上界。
+固定实例与通用短实例均基于实际cu_seqlens分段选择，不能由query的名义T维推断。
+空段在分派前跳过，全局token/状态元数据长度与地址保留64位，短段局部长度验证后使用32位。
+
+状态队列初始化、当前V tile状态转换和下一V tile/下一head预取顺序保持原样。
+packed raw预取、Alloc/EnQue/DeQue/Free闭环和所有现有事件保持不变。
+pending输出在整个V tile范围内连续，长路径不在窗口末尾提前排空；最后同槽MTE3保护保持原样。
+UB、guard、workspace、host、tiling ABI、A5 arch35与入口均不修改。
+
+模板源代码共用不代表最终机器码只有一份。不同实例可能内联生成多段代码，
+采用与否以各条实际热路径的Task Duration及Vector/Scalar指标判定；本轮不使用冷函数隔离。

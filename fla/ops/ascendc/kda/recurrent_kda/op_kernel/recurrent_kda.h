@@ -303,25 +303,19 @@ public:
                 ReleaseEvents();
                 return;
             }
-            if (seqLen > static_cast<int64_t>(TOKEN_WINDOW)) {
-                PrefetchPackedInputs(seq0, static_cast<int32_t>(TOKEN_WINDOW), head_i);
-                bool statePrefetched = false;
-                while (head_i < NV_) {
-                    uint64_t nextHead = head_i + GetBlockNum();
-                    statePrefetched = ProcessLongHead(batch_i, seq0, seq1, head_i, stateSlot,
-                                                      statePrefetched, nextHead < NV_, stateSlot, nextHead);
-                    head_i = nextHead;
-                }
-                continue;
+            const int32_t firstWindowLen = static_cast<int32_t>(
+                seqLen < static_cast<int64_t>(TOKEN_WINDOW) ? seqLen : TOKEN_WINDOW);
+            if (seqLen <= static_cast<int64_t>(TOKEN_WINDOW)) {
+                CopyInBeta(seq0, seq1);
             }
-            CopyInBeta(seq0, seq1);
-            PrefetchPackedInputs(seq0, static_cast<int32_t>(seqLen), head_i);
-            bool statePrefetched = false;
-            while (head_i < NV_) {
-                uint64_t nextHead = head_i + GetBlockNum();
-                statePrefetched = ProcessHead(batch_i, seq0, seq1, head_i, stateSlot,
-                                              statePrefetched, nextHead < NV_, stateSlot, nextHead);
-                head_i = nextHead;
+            PrefetchPackedInputs(seq0, firstWindowLen, head_i);
+            // Select using the validated logical segment, including device cu_seqlens.
+            if (seqLen == 1) {
+                ProcessHeadTasks<1>(batch_i, seq0, seq1, head_i, stateSlot);
+            } else if (seqLen <= static_cast<int64_t>(TOKEN_WINDOW)) {
+                ProcessHeadTasks<-1>(batch_i, seq0, seq1, head_i, stateSlot);
+            } else {
+                ProcessHeadTasks<0>(batch_i, seq0, seq1, head_i, stateSlot);
             }
         }
         ReleaseEvents();
@@ -1014,18 +1008,42 @@ private:
         return beta;
     }
 
+    template <int32_t ShortTokens>
+    __aicore__ inline void ProcessHeadTasks(uint64_t batchIdx, int64_t seq0, int64_t seq1,
+                                           uint64_t head, uint64_t stateSlot)
+    {
+        bool statePrefetched = false;
+        while (head < NV_) {
+            uint64_t nextHead = head + GetBlockNum();
+            statePrefetched = ProcessHead<ShortTokens>(batchIdx, seq0, seq1, head, stateSlot,
+                                                      statePrefetched, nextHead < NV_, stateSlot, nextHead);
+            head = nextHead;
+        }
+    }
+
+    template <int32_t ShortTokens>
     __aicore__ inline bool ProcessHead(uint64_t batchIdx, int64_t seq0, int64_t seq1,
                                       uint64_t head_i, uint64_t stateSlot, bool statePrefetched,
                                       bool hasNextHead, uint64_t nextStateSlot, uint64_t nextHead)
     {
-        CopyInQKVGate(seq0, static_cast<int32_t>(seq1 - seq0), head_i, hasNextHead, nextHead);
-        if (realV_ == 0) {
-            return false;
+        const int64_t sequenceLength = seq1 - seq0;
+        const bool windowed = ShortTokens == 0 && sequenceLength > static_cast<int64_t>(TOKEN_WINDOW);
+        if (!windowed) {
+            // Keep the baseline short-path order and bound the Beta view's live range.
+            const int32_t shortLength =
+                ShortTokens > 0 ? ShortTokens : static_cast<int32_t>(sequenceLength);
+            CopyInQKVGate(seq0, shortLength, head_i, hasNextHead, nextHead);
+            if (realV_ == 0) {
+                return false;
+            }
         }
-        // A head's effective beta is identical for every V block.
         LocalTensor<float> betaValues = scalarBuf_.GetWithOffset<float>(TOKEN_WINDOW, DATA_BLOCK_BYTES);
-        for (int64_t token = 0; token < seq1 - seq0; ++token) {
-            betaValues.SetValue(token, LoadBeta(head_i + static_cast<uint64_t>(token) * NV_));
+        if (!windowed) {
+            const int32_t shortLength =
+                ShortTokens > 0 ? ShortTokens : static_cast<int32_t>(sequenceLength);
+            for (int32_t token = 0; token < shortLength; ++token) {
+                betaValues.SetValue(token, LoadBeta(head_i + static_cast<uint64_t>(token) * NV_));
+            }
         }
         uint64_t nextVOffset = statePrefetched ? vStep_ : 0;
         uint32_t queuedBufferNum = statePrefetched ? 1 : 0;
@@ -1054,112 +1072,35 @@ private:
             uint64_t pendingStateSlot = 0;
             bool hasPendingAttn = false;
             bool hasPendingState = false;
-            for (int64_t seq_i = seq0; seq_i < seq1; seq_i++) {
-                uint64_t curQKOffset = static_cast<uint64_t>(seq_i - seq0) * alignK_;
-                uint64_t curVOffset = static_cast<uint64_t>(seq_i - seq0) * alignV_ + v_i;
-                uint64_t attnOffset = (static_cast<uint64_t>(seq_i) * NV_ + head_i) * realV_ + v_i;
-                uint64_t curStateSlot = StateSlotForToken(batchIdx, seq0, seq_i);
-                uint64_t curStateOutSlot = curStateSlot;
-                beta_ = betaValues.GetValue(seq_i - seq0);
-                Compute(curSingleV, curQKOffset, curVOffset);
-                if (attnOutBufferNum_ == BUFFER_NUM) {
-                    CopyOutAttn(attnOffset, curSingleV);
-                } else {
-                    if (hasPendingAttn) {
-                        CopyOutAttn(pendingAttnOffset, curSingleV);
-                    }
-                    pendingAttnOffset = attnOffset;
-                    hasPendingAttn = true;
-                }
-                if (shouldStoreState_) {
-                    if (stateOutBufferNum_ == BUFFER_NUM) {
-                        CopyOutState(curStateOutSlot, head_i, v_i, curSingleV);
-                    } else {
-                        if (hasPendingState) {
-                            CopyOutState(pendingStateSlot, head_i, v_i, curSingleV);
-                        }
-                        pendingStateSlot = curStateOutSlot;
-                        hasPendingState = true;
-                    }
-                }
-            }
-            if (hasPendingAttn) {
-                CopyOutAttn(pendingAttnOffset, curSingleV);
-            }
-            if (hasPendingState) {
-                // The final two snapshots can target the same GM slot without another
-                // queue allocation to wait for the preceding MTE3 write.
-                if (seq1 - seq0 > 1 &&
-                    pendingStateSlot == StateSlotForToken(batchIdx, seq0, seq1 - 2)) {
-                    int32_t eventId = GetTPipePtr()->AllocEventID<HardEvent::MTE3_S>();
-                    SetFlag<HardEvent::MTE3_S>(eventId);
-                    WaitFlag<HardEvent::MTE3_S>(eventId);
-                    GetTPipePtr()->ReleaseEventID<HardEvent::MTE3_S>(eventId);
-                }
-                CopyOutState(pendingStateSlot, head_i, v_i, curSingleV);
-            }
-        }
-        return nextStatePrefetched;
-     }
-
-    __aicore__ inline bool ProcessLongHead(uint64_t batchIdx, int64_t seq0, int64_t seq1,
-                                      uint64_t head_i, uint64_t stateSlot, bool statePrefetched,
-                                      bool hasNextHead, uint64_t nextStateSlot, uint64_t nextHead)
-    {
-        LocalTensor<float> betaValues = scalarBuf_.GetWithOffset<float>(TOKEN_WINDOW, DATA_BLOCK_BYTES);
-        uint64_t nextVOffset = statePrefetched ? vStep_ : 0;
-        uint32_t queuedBufferNum = statePrefetched ? 1 : 0;
-        for (uint32_t bufferIdx = queuedBufferNum;
-             bufferIdx < INPUT_BUFFER_NUM && nextVOffset < realV_; ++bufferIdx) {
-            uint32_t nextSingleV =
-                nextVOffset + vStep_ > realV_ ? realV_ - nextVOffset : vStep_;
-            PrefetchState(stateSlot, head_i, nextVOffset, nextSingleV);
-            nextVOffset += vStep_;
-        }
-        bool nextStatePrefetched = false;
-        for (uint64_t v_i = 0; v_i < realV_; v_i += vStep_) {
-            uint32_t curSingleV = v_i + vStep_ > realV_ ? realV_ - v_i : vStep_;
-            LoadPrefetchedState(curSingleV);
-            if (nextVOffset < realV_) {
-                uint32_t nextSingleV =
-                    nextVOffset + vStep_ > realV_ ? realV_ - nextVOffset : vStep_;
-                PrefetchState(stateSlot, head_i, nextVOffset, nextSingleV);
-                nextVOffset += vStep_;
-            } else if (hasNextHead && !nextStatePrefetched) {
-                uint32_t nextSingleV = realV_ > vStep_ ? vStep_ : realV_;
-                PrefetchState(nextStateSlot, nextHead, 0, nextSingleV);
-                nextStatePrefetched = true;
-            }
-            uint64_t pendingAttnOffset = 0;
-            uint64_t pendingStateSlot = 0;
-            bool hasPendingAttn = false;
-            bool hasPendingState = false;
-            for (int64_t windowStart = seq0; windowStart < seq1;
-                 windowStart += static_cast<int64_t>(TOKEN_WINDOW)) {
+            int64_t windowStart = seq0;
+            do {
                 const int64_t remaining = seq1 - windowStart;
-                const int32_t windowLen = static_cast<int32_t>(
-                    remaining < static_cast<int64_t>(TOKEN_WINDOW) ? remaining : TOKEN_WINDOW);
-                const int64_t windowEnd = windowStart + windowLen;
-                // The previous window must release its FP32 inputs and shared scratch.
-                PipeBarrier<PIPE_V>();
-                CopyInBeta(windowStart, windowEnd);
+                const int32_t windowLen = ShortTokens > 0 ? ShortTokens :
+                    (ShortTokens < 0 ? static_cast<int32_t>(sequenceLength) : static_cast<int32_t>(
+                        remaining < static_cast<int64_t>(TOKEN_WINDOW) ? remaining : TOKEN_WINDOW));
+                const int64_t windowEnd = ShortTokens < 0 ? seq1 : windowStart + windowLen;
+                if (windowed) {
+                    // The previous window must release its FP32 inputs and shared scratch.
+                    PipeBarrier<PIPE_V>();
+                    CopyInBeta(windowStart, windowEnd);
 
-                int64_t nextStart = windowEnd;
-                uint64_t nextInputHead = head_i;
-                bool hasNextInput = true;
-                if (windowEnd == seq1) {
-                    nextStart = seq0;
-                    if (v_i + vStep_ >= realV_) {
-                        hasNextInput = hasNextHead;
-                        nextInputHead = nextHead;
+                    int64_t nextStart = windowEnd;
+                    uint64_t nextInputHead = head_i;
+                    bool hasNextInput = true;
+                    if (windowEnd == seq1) {
+                        nextStart = seq0;
+                        if (v_i + vStep_ >= realV_) {
+                            hasNextInput = hasNextHead;
+                            nextInputHead = nextHead;
+                        }
                     }
-                }
-                const int64_t nextRemaining = seq1 - nextStart;
-                const int32_t nextLen = static_cast<int32_t>(
-                    nextRemaining < static_cast<int64_t>(TOKEN_WINDOW) ? nextRemaining : TOKEN_WINDOW);
-                CopyInWindow(windowLen, head_i, hasNextInput, nextStart, nextLen, nextInputHead);
-                for (int32_t token = 0; token < windowLen; ++token) {
-                    betaValues.SetValue(token, LoadBeta(head_i + static_cast<uint64_t>(token) * NV_));
+                    const int64_t nextRemaining = seq1 - nextStart;
+                    const int32_t nextLen = static_cast<int32_t>(
+                        nextRemaining < static_cast<int64_t>(TOKEN_WINDOW) ? nextRemaining : TOKEN_WINDOW);
+                    CopyInWindow(windowLen, head_i, hasNextInput, nextStart, nextLen, nextInputHead);
+                    for (int32_t token = 0; token < windowLen; ++token) {
+                        betaValues.SetValue(token, LoadBeta(head_i + static_cast<uint64_t>(token) * NV_));
+                    }
                 }
                 for (int64_t seq_i = windowStart; seq_i < windowEnd; seq_i++) {
                     uint64_t curQKOffset = static_cast<uint64_t>(seq_i - windowStart) * alignK_;
@@ -1190,7 +1131,11 @@ private:
                         }
                     }
                 }
-            }
+                if constexpr (ShortTokens != 0) {
+                    break; // Short instantiations have no outer window loop at runtime.
+                }
+                windowStart = windowEnd;
+            } while (windowStart < seq1);
             if (hasPendingAttn) {
                 CopyOutAttn(pendingAttnOffset, curSingleV);
             }
@@ -1208,7 +1153,7 @@ private:
             }
         }
         return nextStatePrefetched;
-     }
+    }
 
     __aicore__ inline uint64_t FindNextTaskHead(uint64_t batchIdx, uint64_t startHead) const
     {
