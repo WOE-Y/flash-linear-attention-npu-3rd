@@ -61,6 +61,42 @@ def specifications():
         dict(T=17, output=False, inplace=False),
         dict(T=17, initial_none=True, norm=True),
     ]
+    # Append new structures so the original 123 case IDs remain stable.
+    for i, tokens in enumerate([63, 65, 127, 129, 255, 257, 511, 513, 1023]):
+        for j, layout in enumerate(["BSND", "TND"]):
+            configs.append(dict(
+                T=tokens, layout=layout, state_v_first=(i+j) % 2 == 0,
+                state_dtype="bf16" if (i+j) % 2 else "fp32",
+                H=1 if i % 4 == 0 else 3, HV=1 if i % 4 == 0 else 6,
+                V=256 if i % 3 == 0 else 128,
+                norm=(i+j) % 2 == 0, raw_gate=i % 3 == 0,
+                safe_gate=i % 3 == 0 and j == 1,
+                beta_sigmoid=i % 2 == 0, negative=i % 4 == 0,
+                gate_dtype=["fp32", "bf16", "fp16"][i % 3],
+                beta_dtype=["fp16", "fp32", "bf16"][(i+j) % 3],
+            ))
+    configs += [
+        dict(T=65, B=3, cu=False, V=256, state_v_first=False,
+             state_dtype="bf16", norm=True, gate_dtype="bf16", beta_dtype="fp16"),
+        dict(T=129, layout="TND", cu=False, H=3, HV=12, V=256,
+             state_dtype="bf16", strided=True, norm=True, raw_gate=True,
+             safe_gate=True, beta_sigmoid=True, negative=True),
+        dict(T=65, lengths=[0, 9, 16, 17, 0, 33, 65], padding=9,
+             norm=True, raw_gate=True, gate_dtype="bf16", beta_dtype="fp16"),
+        dict(T=65, lengths=[0, 9, 16, 17, 0, 33, 65], layout="TND",
+             indices="repeat", indices_packed=True, accepted=17,
+             metadata_dtype="int64", state_dtype="bf16", V=256, norm=True,
+             raw_gate=True, safe_gate=True, beta_sigmoid=True,
+             gate_dtype="bf16", beta_dtype="fp16", inplace=True, output=False),
+        dict(T=129, lengths=[9, 0, 65, 129], H=1, HV=1, norm=True,
+             indices="unique", accepted=65, metadata_dtype="int32"),
+        dict(T=257, H=2, HV=8, V=256, state_v_first=False, state_dtype="bf16",
+             strided=True, norm=True, raw_gate=True, beta_sigmoid=True,
+             negative=True, gate_dtype="fp16", beta_dtype="bf16"),
+        dict(T=513, layout="TND", V=256, initial_none=True, norm=True,
+             raw_gate=True, safe_gate=True, beta_sigmoid=True,
+             gate_dtype="bf16", beta_dtype="fp16"),
+    ]
     cases = []
     for config in configs:
         for seed in [20261017, 20261018, 20261019]:
@@ -72,6 +108,12 @@ def specifications():
             spec.update(config)
             spec.update(seed=seed, case_id=len(cases), op="recurrent_kda")
             cases.append(spec)
+    # Two extra seeds stress the long tail while every structure keeps >=3 seeds.
+    long_tail = next(spec for spec in cases
+                     if spec["T"] == 1023 and spec["layout"] == "BSND")
+    for seed in [20261020, 20261021]:
+        spec = dict(long_tail, seed=seed, case_id=len(cases))
+        cases.append(spec)
     return cases
 
 
