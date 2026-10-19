@@ -127,6 +127,7 @@ public:
         if (blockIdx >= blockDim) {
             return;
         }
+        InitTaskRange(blockDim);
         pipe_ = pipe;
         SetGlobalTensors(initParams);
         InitLocalBuffers();
@@ -1012,11 +1013,12 @@ private:
     __aicore__ inline void ProcessHeadTasks(uint64_t batchIdx, int64_t seq0, int64_t seq1,
                                            uint64_t head, uint64_t stateSlot)
     {
+        const uint64_t headEnd = TaskHeadEnd(batchIdx);
         bool statePrefetched = false;
-        while (head < NV_) {
-            uint64_t nextHead = head + GetBlockNum();
+        while (head < headEnd) {
+            uint64_t nextHead = head + 1;
             statePrefetched = ProcessHead<ShortTokens>(batchIdx, seq0, seq1, head, stateSlot,
-                                                      statePrefetched, nextHead < NV_, stateSlot, nextHead);
+                                                      statePrefetched, nextHead < headEnd, stateSlot, nextHead);
             head = nextHead;
         }
     }
@@ -1155,12 +1157,34 @@ private:
         return nextStatePrefetched;
     }
 
+    __aicore__ inline void InitTaskRange(uint64_t coreNum)
+    {
+        const uint64_t totalTasks = static_cast<uint64_t>(B_) * NV_;
+        const uint64_t baseTasks = totalTasks / coreNum;
+        const uint64_t extraTasks = totalTasks % coreNum;
+        coreTaskBegin_ = blockIdx * baseTasks + (blockIdx < extraTasks ? blockIdx : extraTasks);
+        coreTaskEnd_ = coreTaskBegin_ + baseTasks + (blockIdx < extraTasks ? 1 : 0);
+    }
+
+    __aicore__ inline uint64_t TaskHeadEnd(uint64_t batchIdx) const
+    {
+        const uint64_t sequenceBegin = batchIdx * NV_;
+        if (coreTaskEnd_ <= sequenceBegin) {
+            return 0;
+        }
+        const uint64_t headEnd = coreTaskEnd_ - sequenceBegin;
+        return headEnd < NV_ ? headEnd : NV_;
+    }
+
     __aicore__ inline uint64_t FindNextTaskHead(uint64_t batchIdx, uint64_t startHead) const
     {
-        const uint64_t blockNum = GetBlockNum();
-        const uint64_t taskRemainder = (batchIdx * NV_ + startHead) % blockNum;
-        const uint64_t head = startHead + (blockIdx + blockNum - taskRemainder) % blockNum;
-        return head < NV_ ? head : NV_;
+        const uint64_t sequenceBegin = batchIdx * NV_;
+        const uint64_t requestedBegin = sequenceBegin + startHead;
+        if (coreTaskBegin_ >= sequenceBegin + NV_ || coreTaskEnd_ <= requestedBegin) {
+            return NV_;
+        }
+        const uint64_t task = coreTaskBegin_ > requestedBegin ? coreTaskBegin_ : requestedBegin;
+        return task - sequenceBegin;
     }
 
 private:
@@ -1266,6 +1290,8 @@ private:
     float scale_;
     float lowerBound_;
     uint64_t blockIdx;
+    uint64_t coreTaskBegin_;
+    uint64_t coreTaskEnd_;
 };
 } // namespace RecurrentKda
 #endif

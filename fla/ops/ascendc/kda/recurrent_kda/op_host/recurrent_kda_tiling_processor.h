@@ -624,6 +624,11 @@ private:
         }
         uint64_t maxCoreNum = (ctx_.aivNum > 0) ? ctx_.aivNum : 1;
         uint64_t selectedCoreNum = (taskUnits < maxCoreNum) ? taskUnits : maxCoreNum;
+        if (ctx_.isA5 == 0) {
+            // Keep the minimum wave count while avoiding partially filled cores.
+            const uint64_t tasksPerCore = (taskUnits + maxCoreNum - 1) / maxCoreNum;
+            selectedCoreNum = (taskUnits + tasksPerCore - 1) / tasksPerCore;
+        }
         tiling.vectorCoreNum = static_cast<uint32_t>(selectedCoreNum);
         OP_LOGD(ctx_.nodeName, "taskUnits: [%llu], selected vectorCoreNum: [%u]",
                 static_cast<unsigned long long>(taskUnits), tiling.vectorCoreNum);
