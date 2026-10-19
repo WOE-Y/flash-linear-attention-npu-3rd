@@ -5,12 +5,15 @@ import argparse
 import json
 import math
 import os
+import sys
 from pathlib import Path
 
 os.environ.setdefault("FLA_NPU_STABLE_ABI", "ctypes")
 
 import torch
 import torch_npu
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from executor_recurrent_kda import recurrent_kda_reference
 from fla_npu.ops.ascendc import recurrent_kda

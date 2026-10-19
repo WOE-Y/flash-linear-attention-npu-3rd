@@ -11,6 +11,7 @@ import torch
 import torch_npu
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
 
 from executor_recurrent_kda import (
     BaseApi, InputDataset, TaskResult, _case_spec, _finite_tuple, _marker_device,

@@ -55,10 +55,6 @@ Shape 符号统一引用 [KDA 模型符号表](../../README.md#model-shape-symbo
 | `lower_bound` | float? | `-5.0` | `[-5,0)` when `safe_gate=True` | safe gate 下界 |
 | `state_v_first` | bool | `false` | `{false, true}` | true 为 `[state_capacity,H_v,V,K]`，false 为 `[state_capacity,H_v,K,V]` |
 
-A2/A3 开启 use_qk_l2norm_in_kernel 时，Q/K 按最后一维计算
-x / sqrt(sum(x*x) + 1e-6)，中间计算为 FP32；Q 在归一化后再乘 scale。
-零向量归一化结果为零。A5 在本轮保持原来的归一化实现。
-
 ## 3. aclnn API
 
 ### 3.1 接口签名
