@@ -135,26 +135,26 @@ public:
 
     __aicore__ inline void SetGlobalTensors(const RKDAInitParams &initParams)
     {
-        queryGm_.SetGlobalBuffer((__gm__ inType *)initParams.query);
-        keyGm_.SetGlobalBuffer((__gm__ inType *)initParams.key);
-        valueGm_.SetGlobalBuffer((__gm__ inType *)initParams.value);
-        gateFloatGm_.SetGlobalBuffer((__gm__ float *)initParams.gate);
-        gateBf16Gm_.SetGlobalBuffer((__gm__ bfloat16_t *)initParams.gate);
-        gateFp16Gm_.SetGlobalBuffer((__gm__ half *)initParams.gate);
-        betaFloatGm_.SetGlobalBuffer((__gm__ float *)initParams.beta);
-        betaBf16Gm_.SetGlobalBuffer((__gm__ bfloat16_t *)initParams.beta);
-        betaFp16Gm_.SetGlobalBuffer((__gm__ half *)initParams.beta);
-        initStateGm_.SetGlobalBuffer((__gm__ stateType *)initParams.initState);
-        cuSeqlensInt32Gm_.SetGlobalBuffer((__gm__ int32_t *)initParams.cuSeqlens);
-        cuSeqlensInt64Gm_.SetGlobalBuffer((__gm__ int64_t *)initParams.cuSeqlens);
-        ssmStateIndicesInt32Gm_.SetGlobalBuffer((__gm__ int32_t *)initParams.ssmStateIndices);
-        ssmStateIndicesInt64Gm_.SetGlobalBuffer((__gm__ int64_t *)initParams.ssmStateIndices);
-        aLogGm_.SetGlobalBuffer((__gm__ float *)initParams.aLog);
-        dtBiasGm_.SetGlobalBuffer((__gm__ float *)initParams.dtBias);
-        numAcceptedTokensInt32Gm_.SetGlobalBuffer((__gm__ int32_t *)initParams.numAcceptedTokens);
-        numAcceptedTokensInt64Gm_.SetGlobalBuffer((__gm__ int64_t *)initParams.numAcceptedTokens);
-        finalStateGm_.SetGlobalBuffer((__gm__ stateType *)initParams.finalState);
-        attnOutGm_.SetGlobalBuffer((__gm__ outType *)initParams.attnOut);
+        queryGm_.SetGlobalBuffer((__gm__ inType *)initParams.query, 0);
+        keyGm_.SetGlobalBuffer((__gm__ inType *)initParams.key, 0);
+        valueGm_.SetGlobalBuffer((__gm__ inType *)initParams.value, 0);
+        gateFloatGm_.SetGlobalBuffer((__gm__ float *)initParams.gate, 0);
+        gateBf16Gm_.SetGlobalBuffer((__gm__ bfloat16_t *)initParams.gate, 0);
+        gateFp16Gm_.SetGlobalBuffer((__gm__ half *)initParams.gate, 0);
+        betaFloatGm_.SetGlobalBuffer((__gm__ float *)initParams.beta, 0);
+        betaBf16Gm_.SetGlobalBuffer((__gm__ bfloat16_t *)initParams.beta, 0);
+        betaFp16Gm_.SetGlobalBuffer((__gm__ half *)initParams.beta, 0);
+        initStateGm_.SetGlobalBuffer((__gm__ stateType *)initParams.initState, 0);
+        cuSeqlensInt32Gm_.SetGlobalBuffer((__gm__ int32_t *)initParams.cuSeqlens, 0);
+        cuSeqlensInt64Gm_.SetGlobalBuffer((__gm__ int64_t *)initParams.cuSeqlens, 0);
+        ssmStateIndicesInt32Gm_.SetGlobalBuffer((__gm__ int32_t *)initParams.ssmStateIndices, 0);
+        ssmStateIndicesInt64Gm_.SetGlobalBuffer((__gm__ int64_t *)initParams.ssmStateIndices, 0);
+        aLogGm_.SetGlobalBuffer((__gm__ float *)initParams.aLog, 0);
+        dtBiasGm_.SetGlobalBuffer((__gm__ float *)initParams.dtBias, 0);
+        numAcceptedTokensInt32Gm_.SetGlobalBuffer((__gm__ int32_t *)initParams.numAcceptedTokens, 0);
+        numAcceptedTokensInt64Gm_.SetGlobalBuffer((__gm__ int64_t *)initParams.numAcceptedTokens, 0);
+        finalStateGm_.SetGlobalBuffer((__gm__ stateType *)initParams.finalState, 0);
+        attnOutGm_.SetGlobalBuffer((__gm__ outType *)initParams.attnOut, 0);
     }
 
     __aicore__ inline void InitLocalBuffers()
@@ -186,6 +186,7 @@ public:
         buffOffset += singleVSize;
         attnInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(vStep_), buffOffset);
         buffOffset += singleVSize;
+        vUbByteOffset_ = buffOffset;
         vInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(TOKEN_WINDOW * alignV_), buffOffset);
         buffOffset += vSize;
         qInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(TOKEN_WINDOW * alignK_), buffOffset);
@@ -877,7 +878,9 @@ private:
         AscendC::PipeBarrier<PIPE_V>();
         ReduceSumDispatch(deltaInUb, broadTmpInUb, curSingleV);
         AscendC::PipeBarrier<PIPE_V>();
-        deltaInUb = vInUb[curVOffset] - deltaInUb;
+        LocalTensor<float> vActive = tmpBuff.GetWithOffset<float>(
+            curSingleV, vUbByteOffset_ + curVOffset * sizeof(float));
+        Sub(deltaInUb, vActive, deltaInUb, curSingleV);
         AscendC::PipeBarrier<PIPE_V>();
         Muls(deltaInUb, deltaInUb, beta_, curSingleV);
         AscendC::PipeBarrier<PIPE_V>();
@@ -1265,6 +1268,7 @@ private:
     uint64_t stateOutStride2_;
     uint64_t stateOutStride3_;
     uint32_t vStep_;
+    uint32_t vUbByteOffset_;
     uint32_t stateOutBufferNum_;
     uint32_t attnOutBufferNum_;
     uint32_t restUbSize_;
